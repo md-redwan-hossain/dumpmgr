@@ -27,6 +27,7 @@ import {
   maintenanceDb,
   restoreDatabase,
   restoreJobs,
+  setDockerDebug,
   verifyConnection,
   type ResolvedDb,
 } from "./docker.ts";
@@ -67,10 +68,14 @@ import {
   selectNestedRestoreAction,
 } from "./prompt.ts";
 
+type CliMode = "dump" | "restore" | "dump-restore";
+
 type GlobalOpts = {
   config: string;
-  yes: boolean;
+  yes?: boolean;
+  debug?: boolean;
   engine?: Engine;
+  mode?: CliMode;
 };
 
 async function unlockOrNull(config: Config, configPath: string): Promise<Session | null> {
@@ -130,25 +135,6 @@ async function resolveConnectedDb(opts: {
   });
 
   return { ...opts.item, password };
-}
-
-/** Try connecting once without retry UI; returns false on failure. */
-async function tryConnectOnce(
-  engine: Engine,
-  image: string,
-  item: DatabaseItem,
-  password: string,
-  role: "source" | "destination",
-): Promise<boolean> {
-  try {
-    await verifyConnection(engine, image, role, item.key, {
-      ...item,
-      password,
-    });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 async function runDumpWithSpinner(
@@ -216,7 +202,7 @@ async function ensureDestDatabase(
   engine: Engine,
   dest: ResolvedDb,
   destName: string,
-  yes: boolean,
+  yes?: boolean,
 ): Promise<void> {
   const image = engineImage(config, engine);
   const exists = await databaseExists(engine, image, dest);
@@ -376,19 +362,10 @@ async function runMode(
       });
       p.log.success(`Parent "${parentItem.key}" OK`);
 
-      const childPassword = await resolveDbPassword({
-        session,
-        rememberPassword: config.rememberPassword,
-        engine,
-        item: destItem,
+      const childExists = await databaseExists(engine, image, {
+        ...parentDb,
+        database: destItem.database,
       });
-      const childExists = await tryConnectOnce(
-        engine,
-        image,
-        destItem,
-        childPassword,
-        "destination",
-      );
 
       const action = await selectNestedRestoreAction(
         `Restore "${fileName}" into "${destItem.key}"?`,
@@ -399,7 +376,12 @@ async function runMode(
         return;
       }
 
-      destDb = { ...destItem, password: childPassword };
+      // Nested DBs are created/owned via parent login; reuse that auth for restore
+      destDb = {
+        ...destItem,
+        user: parentDb.user,
+        password: parentDb.password,
+      };
 
       if (action === "drop") {
         p.log.step(`Dropping database "${destItem.database}"…`);
@@ -564,8 +546,13 @@ async function runMode(
 }
 
 async function runMain(opts: GlobalOpts): Promise<void> {
+  if (opts.debug) {
+    setDockerDebug(true, (msg) => p.log.info(msg));
+  }
+
   const engineLabel = opts.engine ? ` (${opts.engine})` : "";
   p.intro(`dbsync — docker based db dump & sync tool${engineLabel}`);
+  if (opts.debug) p.log.info("Debug mode on");
 
   try {
     await assertDockerAvailable();
@@ -597,6 +584,17 @@ async function runMain(opts: GlobalOpts): Promise<void> {
   const config = await loadConfigAsync(configPath);
   let session = await unlockOrNull(config, configPath);
 
+  if (opts.mode) {
+    try {
+      await runMode(opts.mode, opts, config, session);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      p.log.error(message);
+      process.exit(1);
+    }
+    return;
+  }
+
   for (;;) {
     const mode = await selectMode(config);
     if (mode === "exit") {
@@ -617,43 +615,79 @@ async function runMain(opts: GlobalOpts): Promise<void> {
   }
 }
 
-const program = new Command();
+const MODE_DESCRIPTIONS: Record<CliMode, string> = {
+  dump: "Take dump (write dump file only)",
+  restore: "Restore from dump",
+  "dump-restore": "Take dump and restore (copy source → destination)",
+};
 
-program
-  .name("dbsync")
-  .description(
-    "Dump and sync Postgres / MySQL / MariaDB databases via Docker",
-  )
-  .option("-c, --config <path>", "Path to config.json", "config.json")
-  .option("--yes", "Skip confirms; auto-create missing dest DB", false)
-  .action(async (opts: GlobalOpts) => {
-    try {
-      await runMain(opts);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      p.log.error(message);
-      process.exit(1);
-    }
-  });
+async function handleMain(opts: GlobalOpts): Promise<void> {
+  try {
+    await runMain(opts);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    p.log.error(message);
+    process.exit(1);
+  }
+}
+
+function addCommonOptions(cmd: Command): Command {
+  // ponytail: commander treats a boolean 3rd arg as parseFn, so no `false` default
+  return cmd
+    .option("-c, --config <path>", "Path to config.json", "config.json")
+    .option("--yes", "Skip confirms; auto-create missing dest DB")
+    .option("--debug", "Print docker/DB commands being executed");
+}
+
+function addModeCommands(parent: Command, engine?: Engine): void {
+  for (const mode of ["dump", "restore", "dump-restore"] as const) {
+    addCommonOptions(
+      parent.command(mode).description(MODE_DESCRIPTIONS[mode]),
+    ).action(async (opts: { config: string; yes?: boolean; debug?: boolean }) => {
+      await handleMain({
+        config: opts.config,
+        yes: opts.yes,
+        debug: opts.debug,
+        engine,
+        mode,
+      });
+    });
+  }
+}
+
+const program = new Command();
+program.enablePositionalOptions();
+
+addCommonOptions(
+  program
+    .name("dbsync")
+    .description(
+      "Dump and sync Postgres / MySQL / MariaDB databases via Docker",
+    ),
+).action(async (opts: GlobalOpts) => {
+  await handleMain(opts);
+});
+
+addModeCommands(program);
 
 function addEngineCommand(name: string, engine: Engine, aliases?: string[]) {
-  const cmd = program
-    .command(name)
-    .description(`Run dbsync locked to ${engine}`)
-    .option("-c, --config <path>", "Path to config.json", "config.json")
-    .option("--yes", "Skip confirms; auto-create missing dest DB", false)
-    .action(async (opts: { config: string; yes: boolean }) => {
-      try {
-        await runMain({ config: opts.config, yes: opts.yes, engine });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        p.log.error(message);
-        process.exit(1);
-      }
+  const cmd = addCommonOptions(
+    program
+      .command(name)
+      .description(`Run dbsync locked to ${engine}`)
+      .enablePositionalOptions(),
+  ).action(async (opts: { config: string; yes?: boolean; debug?: boolean }) => {
+    await handleMain({
+      config: opts.config,
+      yes: opts.yes,
+      debug: opts.debug,
+      engine,
     });
+  });
   if (aliases) {
     for (const a of aliases) cmd.alias(a);
   }
+  addModeCommands(cmd, engine);
 }
 
 addEngineCommand("pg", "postgres", ["postgres"]);

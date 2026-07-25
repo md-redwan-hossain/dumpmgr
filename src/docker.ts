@@ -56,10 +56,36 @@ export function restoreJobs(): number {
   return Math.min(cpus().length, 8);
 }
 
+let dockerDebug = false;
+let dockerDebugLog: (msg: string) => void = () => {};
+
+export function setDockerDebug(
+  enabled: boolean,
+  log: (msg: string) => void = console.error,
+): void {
+  dockerDebug = enabled;
+  dockerDebugLog = enabled ? log : () => {};
+}
+
+function formatDockerCmd(args: string[]): string {
+  const parts: string[] = ["docker"];
+  for (const a of args) {
+    let shown = a;
+    if (a.startsWith("PGPASSWORD=") || a.startsWith("MYSQL_PWD=")) {
+      shown = `${a.slice(0, a.indexOf("=") + 1)}***`;
+    }
+    parts.push(/\s/.test(shown) ? JSON.stringify(shown) : shown);
+  }
+  return parts.join(" ");
+}
+
 async function runDocker(
   args: string[],
   opts?: { env?: Record<string, string>; quiet?: boolean },
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  if (dockerDebug) {
+    dockerDebugLog(`[debug] ${formatDockerCmd(args)}`);
+  }
   const proc = Bun.spawn(["docker", ...args], {
     env: { ...process.env, ...opts?.env },
     stdout: "pipe",
@@ -430,14 +456,15 @@ export async function restoreDatabase(
       input,
     ];
     const { exitCode, stderr, stdout } = await runDocker(args, { quiet: true });
-    // pg_restore often exits 1 with warnings; treat only hard failures
-    if (exitCode !== 0 && exitCode !== 1) {
+    // pg_restore exits 1 for warnings (--clean on missing objects, etc.); fail on real errors
+    const hardFail =
+      exitCode > 1 ||
+      (exitCode === 1 &&
+        /pg_restore:\s*error:|ERROR:|FATAL:/i.test(stderr || stdout));
+    if (hardFail) {
       throw new Error(
         `pg_restore failed for ${db.user}@${db.host}/${db.database}:\n${stderr || stdout}`,
       );
-    }
-    if (exitCode === 1 && /fatal|error:/i.test(stderr) && !/warning:/i.test(stderr)) {
-      // keep permissive like many tools: exit 1 is common for non-fatal
     }
     return;
   }

@@ -143,7 +143,7 @@ export async function promptPassword(message: string): Promise<string> {
 
 export async function confirmOrYes(
   message: string,
-  yes: boolean,
+  yes?: boolean,
   initialValue = false,
 ): Promise<boolean> {
   if (yes) return true;
