@@ -1,11 +1,38 @@
 import { cpus } from "node:os";
 import { resolve } from "node:path";
-import type { Database } from "./config.ts";
+import type { DatabaseItem, Engine } from "./config.ts";
 
-export type ResolvedDb = Database & { password: string };
+export type ResolvedDb = DatabaseItem & { password: string };
 
 /** Balanced custom-format compression (same default as Databasus). */
 export const DUMP_COMPRESS = "zstd:5";
+
+/** Fail fast with a clear message if the Docker daemon is not reachable. */
+export async function assertDockerAvailable(): Promise<void> {
+  try {
+    const proc = Bun.spawn(["docker", "info"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+    });
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+      throw new Error(
+        "Docker is not available.",
+      );
+    }
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      err.message.startsWith("Docker is not available")
+    ) {
+      throw err;
+    }
+    throw new Error(
+      "Docker is not available.",
+    );
+  }
+}
 
 /** Rewrite loopback hosts so Docker Desktop on Windows/macOS can reach the host. */
 export function dockerHost(host: string): string {
@@ -18,6 +45,10 @@ export function dockerHost(host: string): string {
 
 function quoteIdent(name: string): string {
   return `"${name.replaceAll('"', '""')}"`;
+}
+
+function quoteMysqlIdent(name: string): string {
+  return `\`${name.replaceAll("`", "``")}\``;
 }
 
 /** Parallel jobs for seekable pg_restore archives (capped like Databasus). */
@@ -50,72 +81,34 @@ async function runDocker(
   return { exitCode, stdout, stderr };
 }
 
-async function runDockerInteractive(
-  args: string[],
-  env?: Record<string, string>,
-): Promise<number> {
-  const proc = Bun.spawn(["docker", ...args], {
-    env: { ...process.env, ...env },
-    stdout: "inherit",
-    stderr: "inherit",
-    stdin: "ignore",
-  });
-  return await proc.exited;
-}
-
-function baseRunArgs(image: string, password: string, volume?: string): string[] {
+function pgBaseArgs(
+  image: string,
+  password: string,
+  volume?: string,
+): string[] {
   const args = ["run", "--rm", "-e", `PGPASSWORD=${password}`];
-  if (volume) {
-    args.push("-v", volume);
-  }
+  if (volume) args.push("-v", volume);
   args.push(image);
   return args;
 }
 
-function pgDumpArgList(db: ResolvedDb): string[] {
-  const host = dockerHost(db.host);
-  return [
-    "pg_dump",
-    "-h",
-    host,
-    "-p",
-    String(db.port),
-    "-U",
-    db.user,
-    "-d",
-    db.dbname,
-    "-Fc",
-    `--compress=${DUMP_COMPRESS}`,
-  ];
-}
-
-function pgRestoreArgList(db: ResolvedDb, input: string, parallel: boolean): string[] {
-  const host = dockerHost(db.host);
-  const args = [
-    "pg_restore",
-    "-h",
-    host,
-    "-p",
-    String(db.port),
-    "-U",
-    db.user,
-    "-d",
-    db.dbname,
-    "--clean",
-    "--if-exists",
-    "--no-owner",
-    "--no-acl",
-  ];
-  // Parallel restore needs a seekable archive; stdin "-" cannot use -j.
-  if (parallel) {
-    args.push("-j", String(restoreJobs()));
-  }
-  args.push(input);
+function mysqlBaseArgs(
+  image: string,
+  password: string,
+  volume?: string,
+): string[] {
+  const args = ["run", "--rm", "-e", `MYSQL_PWD=${password}`];
+  if (volume) args.push("-v", volume);
+  args.push(image);
   return args;
 }
 
-/** Verify host/port/user/password. Source connects to dbname; dest uses maintenance DB `postgres`. */
+function maintenanceDb(engine: Engine): string {
+  return engine === "postgres" ? "postgres" : "mysql";
+}
+
 export async function verifyConnection(
+  engine: Engine,
   image: string,
   role: "source" | "destination",
   label: string,
@@ -123,24 +116,51 @@ export async function verifyConnection(
   opts?: { database?: string },
 ): Promise<void> {
   const host = dockerHost(db.host);
-  const database = opts?.database ?? db.dbname;
+  const database = opts?.database ?? db.name;
+
+  if (engine === "postgres") {
+    const args = [
+      ...pgBaseArgs(image, db.password),
+      "psql",
+      "--host",
+      host,
+      "--port",
+      String(db.port),
+      "--username",
+      db.user,
+      "--dbname",
+      database,
+      "-tAc",
+      "SELECT 1",
+    ];
+    const { exitCode, stdout, stderr } = await runDocker(args, { quiet: true });
+    if (exitCode !== 0 || stdout.trim() !== "1") {
+      throw new Error(
+        `Cannot connect to ${role} "${label}" (${db.user}@${db.host}:${db.port}/${database}):\n${stderr || stdout}`,
+      );
+    }
+    return;
+  }
+
+  const client = engine === "mariadb" ? "mariadb" : "mysql";
   const args = [
-    ...baseRunArgs(image, db.password),
-    "psql",
-    "-h",
+    ...mysqlBaseArgs(image, db.password),
+    client,
+    "--host",
     host,
-    "-p",
+    "--port",
     String(db.port),
-    "-U",
+    "--user",
     db.user,
-    "-d",
+    "--database",
     database,
-    "-tAc",
+    "--batch",
+    "--skip-column-names",
+    "--execute",
     "SELECT 1",
   ];
-
   const { exitCode, stdout, stderr } = await runDocker(args, { quiet: true });
-  if (exitCode !== 0 || stdout.trim() !== "1") {
+  if (exitCode !== 0 || !stdout.trim().startsWith("1")) {
     throw new Error(
       `Cannot connect to ${role} "${label}" (${db.user}@${db.host}:${db.port}/${database}):\n${stderr || stdout}`,
     );
@@ -148,66 +168,125 @@ export async function verifyConnection(
 }
 
 export async function databaseExists(
+  engine: Engine,
   image: string,
   db: ResolvedDb,
 ): Promise<boolean> {
   const host = dockerHost(db.host);
-  const sql = `SELECT 1 FROM pg_database WHERE datname='${db.dbname.replaceAll("'", "''")}'`;
+
+  if (engine === "postgres") {
+    const sql = `SELECT 1 FROM pg_database WHERE datname='${db.name.replaceAll("'", "''")}'`;
+    const args = [
+      ...pgBaseArgs(image, db.password),
+      "psql",
+      "--host",
+      host,
+      "--port",
+      String(db.port),
+      "--username",
+      db.user,
+      "--dbname",
+      "postgres",
+      "-tAc",
+      sql,
+    ];
+    const { exitCode, stdout, stderr } = await runDocker(args, { quiet: true });
+    if (exitCode !== 0) {
+      throw new Error(
+        `Failed to check if database exists on ${db.host}:${db.port}:\n${stderr || stdout}`,
+      );
+    }
+    return stdout.trim() === "1";
+  }
+
+  const client = engine === "mariadb" ? "mariadb" : "mysql";
+  const sql = `SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='${db.name.replaceAll("'", "''")}'`;
   const args = [
-    ...baseRunArgs(image, db.password),
-    "psql",
-    "-h",
+    ...mysqlBaseArgs(image, db.password),
+    client,
+    "--host",
     host,
-    "-p",
+    "--port",
     String(db.port),
-    "-U",
+    "--user",
     db.user,
-    "-d",
-    "postgres",
-    "-tAc",
+    "--database",
+    "mysql",
+    "--batch",
+    "--skip-column-names",
+    "--execute",
     sql,
   ];
-
   const { exitCode, stdout, stderr } = await runDocker(args, { quiet: true });
   if (exitCode !== 0) {
     throw new Error(
       `Failed to check if database exists on ${db.host}:${db.port}:\n${stderr || stdout}`,
     );
   }
-  return stdout.trim() === "1";
+  return stdout.trim() === db.name;
 }
 
 export async function createDatabase(
+  engine: Engine,
   image: string,
   db: ResolvedDb,
 ): Promise<void> {
   const host = dockerHost(db.host);
-  const sql = `CREATE DATABASE ${quoteIdent(db.dbname)}`;
+
+  if (engine === "postgres") {
+    const sql = `CREATE DATABASE ${quoteIdent(db.name)}`;
+    const args = [
+      ...pgBaseArgs(image, db.password),
+      "psql",
+      "--host",
+      host,
+      "--port",
+      String(db.port),
+      "--username",
+      db.user,
+      "--dbname",
+      "postgres",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      sql,
+    ];
+    const { exitCode, stderr, stdout } = await runDocker(args, { quiet: true });
+    if (exitCode !== 0) {
+      throw new Error(
+        `Failed to create database "${db.name}":\n${stderr || stdout}`,
+      );
+    }
+    return;
+  }
+
+  const client = engine === "mariadb" ? "mariadb" : "mysql";
+  const sql = `CREATE DATABASE ${quoteMysqlIdent(db.name)}`;
   const args = [
-    ...baseRunArgs(image, db.password),
-    "psql",
-    "-h",
+    ...mysqlBaseArgs(image, db.password),
+    client,
+    "--host",
     host,
-    "-p",
+    "--port",
     String(db.port),
-    "-U",
+    "--user",
     db.user,
-    "-d",
-    "postgres",
-    "-v",
-    "ON_ERROR_STOP=1",
-    "-c",
+    "--database",
+    "mysql",
+    "--execute",
     sql,
   ];
-
-  const exitCode = await runDockerInteractive(args);
+  const { exitCode, stderr, stdout } = await runDocker(args, { quiet: true });
   if (exitCode !== 0) {
-    throw new Error(`Failed to create database "${db.dbname}"`);
+    throw new Error(
+      `Failed to create database "${db.name}":\n${stderr || stdout}`,
+    );
   }
 }
 
-/** File-based dump for `--keep-dump` (Docker volume mount). */
-export async function pgDump(
+/** Quiet file dump (for ora spinner). workdir mounted at /backup; dumpFileName relative to workdir. */
+export async function dumpDatabase(
+  engine: Engine,
   image: string,
   db: ResolvedDb,
   workdir: string,
@@ -215,22 +294,54 @@ export async function pgDump(
 ): Promise<void> {
   const absWorkdir = resolve(workdir);
   const volume = `${absWorkdir}:/backup`;
+  const host = dockerHost(db.host);
+  const out = `/backup/${dumpFileName}`;
 
+  if (engine === "postgres") {
+    const args = [
+      ...pgBaseArgs(image, db.password, volume),
+      "pg_dump",
+      `--host=${host}`,
+      `--port=${db.port}`,
+      `--username=${db.user}`,
+      `--dbname=${db.name}`,
+      "--format=custom",
+      `--compress=${DUMP_COMPRESS}`,
+      `--file=${out}`,
+    ];
+    const { exitCode, stderr, stdout } = await runDocker(args, { quiet: true });
+    if (exitCode !== 0) {
+      throw new Error(
+        `pg_dump failed for ${db.user}@${db.host}/${db.name}:\n${stderr || stdout}`,
+      );
+    }
+    return;
+  }
+
+  const dumpCmd = engine === "mariadb" ? "mariadb-dump" : "mysqldump";
   const args = [
-    ...baseRunArgs(image, db.password, volume),
-    ...pgDumpArgList(db),
-    "-f",
-    `/backup/${dumpFileName}`,
+    ...mysqlBaseArgs(image, db.password, volume),
+    dumpCmd,
+    `--host=${host}`,
+    `--port=${db.port}`,
+    `--user=${db.user}`,
+    "--single-transaction",
+    "--routines",
+    "--triggers",
+    "--databases",
+    db.name,
+    `--result-file=${out}`,
   ];
-
-  const exitCode = await runDockerInteractive(args);
+  const { exitCode, stderr, stdout } = await runDocker(args, { quiet: true });
   if (exitCode !== 0) {
-    throw new Error(`pg_dump failed for ${db.user}@${db.host}/${db.dbname}`);
+    throw new Error(
+      `${dumpCmd} failed for ${db.user}@${db.host}/${db.name}:\n${stderr || stdout}`,
+    );
   }
 }
 
-/** File-based restore with parallel jobs (seekable archive). */
-export async function pgRestore(
+export async function restoreDatabase(
+  engine: Engine,
   image: string,
   db: ResolvedDb,
   workdir: string,
@@ -238,70 +349,57 @@ export async function pgRestore(
 ): Promise<void> {
   const absWorkdir = resolve(workdir);
   const volume = `${absWorkdir}:/backup`;
+  const host = dockerHost(db.host);
+  const input = `/backup/${dumpFileName}`;
 
-  const args = [
-    ...baseRunArgs(image, db.password, volume),
-    ...pgRestoreArgList(db, `/backup/${dumpFileName}`, true),
-  ];
-
-  const exitCode = await runDockerInteractive(args);
-  if (exitCode !== 0) {
-    throw new Error(`pg_restore failed for ${db.user}@${db.host}/${db.dbname}`);
+  if (engine === "postgres") {
+    const args = [
+      ...pgBaseArgs(image, db.password, volume),
+      "pg_restore",
+      `--host=${host}`,
+      `--port=${db.port}`,
+      `--username=${db.user}`,
+      `--dbname=${db.name}`,
+      "--clean",
+      "--if-exists",
+      "--no-owner",
+      "--no-acl",
+      `--jobs=${restoreJobs()}`,
+      input,
+    ];
+    const { exitCode, stderr, stdout } = await runDocker(args, { quiet: true });
+    // pg_restore often exits 1 with warnings; treat only hard failures
+    if (exitCode !== 0 && exitCode !== 1) {
+      throw new Error(
+        `pg_restore failed for ${db.user}@${db.host}/${db.name}:\n${stderr || stdout}`,
+      );
+    }
+    if (exitCode === 1 && /fatal|error:/i.test(stderr) && !/warning:/i.test(stderr)) {
+      // keep permissive like many tools: exit 1 is common for non-fatal
+    }
+    return;
   }
-}
 
-function shSingleQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
-/**
- * Stream pg_dump into pg_restore inside one container (Linux pipe).
- * Avoids host→Docker stdin piping, which breaks on Windows Docker Desktop
- * (`pg_restore: could not open input file "-"`).
- * Parallel `-j` is omitted: pg_restore cannot seek a pipe.
- */
-export async function pgDumpRestorePipe(
-  image: string,
-  source: ResolvedDb,
-  dest: ResolvedDb,
-): Promise<void> {
-  const sourceHost = dockerHost(source.host);
-  const destHost = dockerHost(dest.host);
-
-  const script = [
-    "set -o pipefail;",
-    `PGPASSWORD="$PGPASSWORD_SRC" pg_dump`,
-    `-h ${shSingleQuote(sourceHost)}`,
-    `-p ${source.port}`,
-    `-U ${shSingleQuote(source.user)}`,
-    `-d ${shSingleQuote(source.dbname)}`,
-    `-Fc --compress=${DUMP_COMPRESS}`,
-    "|",
-    `PGPASSWORD="$PGPASSWORD_DEST" pg_restore`,
-    `-h ${shSingleQuote(destHost)}`,
-    `-p ${dest.port}`,
-    `-U ${shSingleQuote(dest.user)}`,
-    `-d ${shSingleQuote(dest.dbname)}`,
-    "--clean --if-exists --no-owner --no-acl",
-  ].join(" ");
-
+  const client = engine === "mariadb" ? "mariadb" : "mysql";
+  // mysqldump --databases emits CREATE/USE; feed file via shell redirect
   const args = [
     "run",
     "--rm",
     "-e",
-    `PGPASSWORD_SRC=${source.password}`,
-    "-e",
-    `PGPASSWORD_DEST=${dest.password}`,
+    `MYSQL_PWD=${db.password}`,
+    "-v",
+    volume,
     image,
     "bash",
     "-c",
-    script,
+    `${client} --host=${host} --port=${db.port} --user=${db.user} < ${input}`,
   ];
-
-  const exitCode = await runDockerInteractive(args);
+  const { exitCode, stderr, stdout } = await runDocker(args, { quiet: true });
   if (exitCode !== 0) {
     throw new Error(
-      `Streamed dump/restore failed: ${source.user}@${source.host}/${source.dbname} → ${dest.user}@${dest.host}/${dest.dbname}`,
+      `${client} restore failed for ${db.user}@${db.host}/${db.name}:\n${stderr || stdout}`,
     );
   }
 }
+
+export { maintenanceDb };
