@@ -181,6 +181,75 @@ export async function selectNestedRestoreAction(
   return choice;
 }
 
+/** Postgres only. `--yes` defaults to replace (clean). */
+export async function selectReplaceExistingObjects(
+  yes?: boolean,
+): Promise<boolean> {
+  if (yes) return true;
+  const choice = await p.select({
+    message: "Existing objects in destination?",
+    options: [
+      {
+        value: true as const,
+        label: "Replace existing objects",
+        hint: "pg_restore --clean --if-exists",
+      },
+      {
+        value: false as const,
+        label: "Keep existing objects",
+        hint: "May fail on name collisions",
+      },
+    ],
+  });
+  if (p.isCancel(choice)) onCancel();
+  return choice;
+}
+
+export type NestedCreatePasswordSource = "parent" | "saved" | "new";
+
+export async function selectNestedCreatePassword(opts: {
+  hasSaved: boolean;
+}): Promise<NestedCreatePasswordSource> {
+  const options: {
+    value: NestedCreatePasswordSource;
+    label: string;
+    hint?: string;
+  }[] = [
+    {
+      value: "parent",
+      label: "Use password from parent",
+      hint: "Restore with parent user credentials",
+    },
+  ];
+  if (opts.hasSaved) {
+    options.push({
+      value: "saved",
+      label: "Use saved password",
+      hint: "Child user + password from vault",
+    });
+  }
+  options.push({
+    value: "new",
+    label: "Create new password",
+    hint: "Set password for child user, then restore",
+  });
+  const choice = await p.select({
+    message: "Password for new database?",
+    options,
+  });
+  if (p.isCancel(choice)) onCancel();
+  return choice;
+}
+
+export async function promptConfirmedPassword(label: string): Promise<string> {
+  const password = await promptPassword(label);
+  const confirm = await promptPassword(`confirm ${label}`);
+  if (password !== confirm) {
+    throw new Error("Passwords do not match");
+  }
+  return password;
+}
+
 export async function resolveDbPassword(opts: {
   session: Session | null;
   rememberPassword: boolean;

@@ -24,6 +24,7 @@ import {
   dropDatabase,
   DUMP_COMPRESS,
   dumpDatabase,
+  ensureDatabaseLogin,
   maintenanceDb,
   restoreDatabase,
   restoreJobs,
@@ -49,6 +50,7 @@ import {
 import { runInit } from "./init.ts";
 import {
   changeMasterPassword,
+  getDbPassword,
   metadataPathForConfig,
   setDbPassword,
   unlockSession,
@@ -59,13 +61,16 @@ import {
   confirmOrYes,
   connectWithRetry,
   onCancel,
+  promptConfirmedPassword,
   promptPassword,
   resolveDbPassword,
   selectDatabaseItem,
   selectDatabaseTree,
   selectEngine,
   selectMode,
+  selectNestedCreatePassword,
   selectNestedRestoreAction,
+  selectReplaceExistingObjects,
 } from "./prompt.ts";
 
 type CliMode = "dump" | "restore" | "dump-restore";
@@ -174,6 +179,7 @@ async function runRestoreWithSpinner(
   workdir: string,
   dumpFileName: string,
   label: string,
+  opts?: { clean?: boolean },
 ): Promise<number> {
   const jobsHint =
     engine === "postgres" ? ` (--jobs ${restoreJobs()})` : "";
@@ -184,8 +190,17 @@ async function runRestoreWithSpinner(
   const tick = setInterval(() => {
     spinner.text = `Restoring ${label}${jobsHint}… ${formatDuration(performance.now() - t0)}`;
   }, 100);
+  let warnings: string | undefined;
   try {
-    await restoreDatabase(engine, image, db, workdir, dumpFileName);
+    const result = await restoreDatabase(
+      engine,
+      image,
+      db,
+      workdir,
+      dumpFileName,
+      opts,
+    );
+    warnings = result.warnings;
   } catch (err) {
     clearInterval(tick);
     spinner.fail("Restore failed");
@@ -194,7 +209,20 @@ async function runRestoreWithSpinner(
   clearInterval(tick);
   const elapsedMs = performance.now() - t0;
   spinner.succeed(`Restore complete in ${formatDuration(elapsedMs)}`);
+  if (warnings) {
+    p.log.warn(`pg_restore reported ignored errors:\n${warnings}`);
+  }
   return elapsedMs;
+}
+
+async function resolveRestoreClean(opts: {
+  engine: Engine;
+  intoExisting: boolean;
+  yes?: boolean;
+}): Promise<boolean> {
+  if (opts.engine !== "postgres") return false;
+  if (!opts.intoExisting) return false;
+  return selectReplaceExistingObjects(opts.yes);
 }
 
 async function ensureDestDatabase(
@@ -203,10 +231,10 @@ async function ensureDestDatabase(
   dest: ResolvedDb,
   destName: string,
   yes?: boolean,
-): Promise<void> {
+): Promise<{ created: boolean }> {
   const image = engineImage(config, engine);
   const exists = await databaseExists(engine, image, dest);
-  if (exists) return;
+  if (exists) return { created: false };
   const create = await confirmOrYes(
     `Database "${dest.database}" does not exist on destination (${destName}). Create it?`,
     yes,
@@ -218,6 +246,7 @@ async function ensureDestDatabase(
   p.log.step(`Creating database "${dest.database}"…`);
   await createDatabase(engine, image, dest);
   p.log.success(`Created "${dest.database}"`);
+  return { created: true };
 }
 
 async function handleChangeMaster(
@@ -342,6 +371,7 @@ async function runMode(
     );
 
     let destDb: ResolvedDb;
+    let intoExisting = false;
 
     if (destItem.nested && destItem.parentKey) {
       const parentItem = getParentItem(config, engine, destItem.parentKey);
@@ -358,14 +388,22 @@ async function runMode(
         engine,
         item: parentItem,
         role: "destination",
-        maintenance: true,
       });
       p.log.success(`Parent "${parentItem.key}" OK`);
 
-      const childExists = await databaseExists(engine, image, {
+      const parentLogin = parentDb.database;
+      const childTarget = {
         ...parentDb,
         database: destItem.database,
-      });
+      };
+      const connectOpts = { connectDatabase: parentLogin };
+
+      const childExists = await databaseExists(
+        engine,
+        image,
+        childTarget,
+        connectOpts,
+      );
 
       const action = await selectNestedRestoreAction(
         `Restore "${fileName}" into "${destItem.key}"?`,
@@ -376,34 +414,73 @@ async function runMode(
         return;
       }
 
-      // Nested DBs are created/owned via parent login; reuse that auth for restore
-      destDb = {
-        ...destItem,
-        user: parentDb.user,
-        password: parentDb.password,
-      };
-
       if (action === "drop") {
         p.log.step(`Dropping database "${destItem.database}"…`);
-        await dropDatabase(engine, image, {
-          ...parentDb,
-          database: destItem.database,
-        });
+        await dropDatabase(engine, image, childTarget, connectOpts);
         p.log.step(`Creating database "${destItem.database}"…`);
-        await createDatabase(engine, image, {
-          ...parentDb,
-          database: destItem.database,
-        });
+        await createDatabase(engine, image, childTarget, connectOpts);
         p.log.success(`Recreated "${destItem.database}"`);
       } else if (action === "create") {
         p.log.step(`Creating database "${destItem.database}"…`);
-        await createDatabase(engine, image, {
-          ...parentDb,
-          database: destItem.database,
-        });
+        await createDatabase(engine, image, childTarget, connectOpts);
         p.log.success(`Created "${destItem.database}"`);
       }
-      // action === "yes": restore as-is
+
+      if (action === "create" || action === "drop") {
+        if (parentDb.user === destItem.user) {
+          destDb = {
+            ...destItem,
+            user: parentDb.user,
+            password: parentDb.password,
+          };
+        } else {
+          const childKey = dbKey(engine, destItem.key);
+          const saved =
+            session && config.rememberPassword
+              ? await getDbPassword(session, childKey)
+              : null;
+          const pwSource = opts.yes
+            ? "parent"
+            : await selectNestedCreatePassword({ hasSaved: Boolean(saved) });
+
+          if (pwSource === "parent") {
+            destDb = {
+              ...destItem,
+              user: parentDb.user,
+              password: parentDb.password,
+            };
+          } else if (pwSource === "saved") {
+            if (!saved) {
+              throw new Error(`No saved password for "${destItem.key}"`);
+            }
+            destDb = { ...destItem, password: saved };
+          } else {
+            const password = await promptConfirmedPassword(
+              `password for ${destItem.key} (${destItem.user})`,
+            );
+            p.log.step(`Ensuring login "${destItem.user}"…`);
+            await ensureDatabaseLogin(engine, image, parentDb, {
+              user: destItem.user,
+              password,
+              database: destItem.database,
+              connectDatabase: parentLogin,
+            });
+            if (config.rememberPassword && session) {
+              await setDbPassword(session, childKey, password);
+            }
+            destDb = { ...destItem, password };
+            p.log.success(`Login "${destItem.user}" ready`);
+          }
+        }
+      } else {
+        // action === "yes": restore into existing with parent creds
+        intoExisting = true;
+        destDb = {
+          ...destItem,
+          user: parentDb.user,
+          password: parentDb.password,
+        };
+      }
     } else {
       destDb = await resolveConnectedDb({
         config,
@@ -413,7 +490,14 @@ async function runMode(
         role: "destination",
         maintenance: true,
       });
-      await ensureDestDatabase(config, engine, destDb, destItem.key, opts.yes);
+      const { created } = await ensureDestDatabase(
+        config,
+        engine,
+        destDb,
+        destItem.key,
+        opts.yes,
+      );
+      intoExisting = !created;
 
       const confirmed = await confirmOrYes(
         `Restore "${fileName}" into "${destItem.key}"?`,
@@ -425,6 +509,12 @@ async function runMode(
         return;
       }
     }
+
+    const clean = await resolveRestoreClean({
+      engine,
+      intoExisting,
+      yes: opts.yes,
+    });
 
     let restoreDir = dir;
     let restoreName = fileName;
@@ -450,6 +540,7 @@ async function runMode(
         restoreDir,
         restoreName,
         destItem.key,
+        { clean },
       );
     } finally {
       if (tempPlain) await rm(tempPlain, { force: true });
@@ -483,7 +574,13 @@ async function runMode(
     role: "destination",
     maintenance: true,
   });
-  await ensureDestDatabase(config, engine, destDb, destItem.key, opts.yes);
+  const { created: destCreated } = await ensureDestDatabase(
+    config,
+    engine,
+    destDb,
+    destItem.key,
+    opts.yes,
+  );
 
   p.note(
     [
@@ -510,6 +607,12 @@ async function runMode(
     return;
   }
 
+  const clean = await resolveRestoreClean({
+    engine,
+    intoExisting: !destCreated,
+    yes: opts.yes,
+  });
+
   const dir = dbDumpDir(dumpsRoot, engine, sourceItem.key);
   await mkdir(dir, { recursive: true });
   const plainName = newDumpFileName(engine, sourceItem.key);
@@ -529,6 +632,7 @@ async function runMode(
     dir,
     plainName,
     destItem.key,
+    { clean },
   );
 
   let finalPath = join(dir, plainName);

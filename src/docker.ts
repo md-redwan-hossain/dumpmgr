@@ -51,6 +51,14 @@ function quoteMysqlIdent(name: string): string {
   return `\`${name.replaceAll("`", "``")}\``;
 }
 
+function quoteLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+function quoteMysqlLiteral(value: string): string {
+  return `'${value.replaceAll("\\", "\\\\").replaceAll("'", "''")}'`;
+}
+
 /** Parallel jobs for seekable pg_restore archives (capped like Databasus). */
 export function restoreJobs(): number {
   return Math.min(cpus().length, 8);
@@ -197,8 +205,10 @@ export async function databaseExists(
   engine: Engine,
   image: string,
   db: ResolvedDb,
+  opts?: { connectDatabase?: string },
 ): Promise<boolean> {
   const host = dockerHost(db.host);
+  const loginDb = opts?.connectDatabase ?? maintenanceDb(engine);
 
   if (engine === "postgres") {
     const sql = `SELECT 1 FROM pg_database WHERE datname='${db.database.replaceAll("'", "''")}'`;
@@ -212,7 +222,7 @@ export async function databaseExists(
       "--username",
       db.user,
       "--dbname",
-      "postgres",
+      loginDb,
       "-tAc",
       sql,
     ];
@@ -237,7 +247,7 @@ export async function databaseExists(
     "--user",
     db.user,
     "--database",
-    "mysql",
+    loginDb,
     "--batch",
     "--skip-column-names",
     "--execute",
@@ -256,8 +266,10 @@ export async function createDatabase(
   engine: Engine,
   image: string,
   db: ResolvedDb,
+  opts?: { connectDatabase?: string },
 ): Promise<void> {
   const host = dockerHost(db.host);
+  const loginDb = opts?.connectDatabase ?? maintenanceDb(engine);
 
   if (engine === "postgres") {
     const sql = `CREATE DATABASE ${quoteIdent(db.database)}`;
@@ -271,7 +283,7 @@ export async function createDatabase(
       "--username",
       db.user,
       "--dbname",
-      "postgres",
+      loginDb,
       "-v",
       "ON_ERROR_STOP=1",
       "-c",
@@ -298,7 +310,7 @@ export async function createDatabase(
     "--user",
     db.user,
     "--database",
-    "mysql",
+    loginDb,
     "--execute",
     sql,
   ];
@@ -314,8 +326,10 @@ export async function dropDatabase(
   engine: Engine,
   image: string,
   db: ResolvedDb,
+  opts?: { connectDatabase?: string },
 ): Promise<void> {
   const host = dockerHost(db.host);
+  const loginDb = opts?.connectDatabase ?? maintenanceDb(engine);
 
   if (engine === "postgres") {
     const esc = db.database.replaceAll("'", "''");
@@ -332,7 +346,7 @@ export async function dropDatabase(
         "--username",
         db.user,
         "--dbname",
-        "postgres",
+        loginDb,
         "-v",
         "ON_ERROR_STOP=1",
         "-c",
@@ -360,7 +374,7 @@ export async function dropDatabase(
     "--user",
     db.user,
     "--database",
-    "mysql",
+    loginDb,
     "--execute",
     sql,
   ];
@@ -368,6 +382,103 @@ export async function dropDatabase(
   if (exitCode !== 0) {
     throw new Error(
       `Failed to drop database "${db.database}":\n${stderr || stdout}`,
+    );
+  }
+}
+
+/** Create/alter login role and grant access to a database (via parent connection). */
+export async function ensureDatabaseLogin(
+  engine: Engine,
+  image: string,
+  parentDb: ResolvedDb,
+  opts: {
+    user: string;
+    password: string;
+    database: string;
+    connectDatabase?: string;
+  },
+): Promise<void> {
+  const host = dockerHost(parentDb.host);
+  const loginDb = opts.connectDatabase ?? maintenanceDb(engine);
+
+  if (engine === "postgres") {
+    const role = quoteIdent(opts.user);
+    const roleLit = quoteLiteral(opts.user);
+    const pwLit = quoteLiteral(opts.password);
+    const dbIdent = quoteIdent(opts.database);
+    const ensureRole = [
+      `DO $dbsync$ BEGIN`,
+      `  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${roleLit}) THEN`,
+      `    CREATE ROLE ${role} LOGIN PASSWORD ${pwLit};`,
+      `  ELSE`,
+      `    ALTER ROLE ${role} PASSWORD ${pwLit};`,
+      `  END IF;`,
+      `END $dbsync$`,
+    ].join(" ");
+    const grantDb = `GRANT ALL PRIVILEGES ON DATABASE ${dbIdent} TO ${role}`;
+    const grantSchema = `GRANT ALL ON SCHEMA public TO ${role}`;
+
+    for (const [sql, dbname] of [
+      [ensureRole, loginDb],
+      [grantDb, loginDb],
+      [grantSchema, opts.database],
+    ] as const) {
+      const args = [
+        ...pgBaseArgs(image, parentDb.password),
+        "psql",
+        "--host",
+        host,
+        "--port",
+        String(parentDb.port),
+        "--username",
+        parentDb.user,
+        "--dbname",
+        dbname,
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-c",
+        sql,
+      ];
+      const { exitCode, stderr, stdout } = await runDocker(args, {
+        quiet: true,
+      });
+      if (exitCode !== 0) {
+        throw new Error(
+          `Failed to ensure login "${opts.user}" on "${opts.database}":\n${stderr || stdout}`,
+        );
+      }
+    }
+    return;
+  }
+
+  const client = engine === "mariadb" ? "mariadb" : "mysql";
+  const userLit = quoteMysqlLiteral(opts.user);
+  const pwLit = quoteMysqlLiteral(opts.password);
+  const dbIdent = quoteMysqlIdent(opts.database);
+  const sql = [
+    `CREATE USER IF NOT EXISTS ${userLit}@'%' IDENTIFIED BY ${pwLit}`,
+    `ALTER USER ${userLit}@'%' IDENTIFIED BY ${pwLit}`,
+    `GRANT ALL PRIVILEGES ON ${dbIdent}.* TO ${userLit}@'%'`,
+    `FLUSH PRIVILEGES`,
+  ].join("; ");
+  const args = [
+    ...mysqlBaseArgs(image, parentDb.password),
+    client,
+    "--host",
+    host,
+    "--port",
+    String(parentDb.port),
+    "--user",
+    parentDb.user,
+    "--database",
+    loginDb,
+    "--execute",
+    sql,
+  ];
+  const { exitCode, stderr, stdout } = await runDocker(args, { quiet: true });
+  if (exitCode !== 0) {
+    throw new Error(
+      `Failed to ensure login "${opts.user}" on "${opts.database}":\n${stderr || stdout}`,
     );
   }
 }
@@ -434,11 +545,13 @@ export async function restoreDatabase(
   db: ResolvedDb,
   workdir: string,
   dumpFileName: string,
-): Promise<void> {
+  opts?: { clean?: boolean },
+): Promise<{ warnings?: string }> {
   const absWorkdir = resolve(workdir);
   const volume = `${absWorkdir}:/backup`;
   const host = dockerHost(db.host);
   const input = `/backup/${dumpFileName}`;
+  const clean = opts?.clean ?? false;
 
   if (engine === "postgres") {
     const args = [
@@ -448,25 +561,37 @@ export async function restoreDatabase(
       `--port=${db.port}`,
       `--username=${db.user}`,
       `--dbname=${db.database}`,
-      "--clean",
-      "--if-exists",
+      ...(clean ? ["--clean", "--if-exists"] : []),
       "--no-owner",
       "--no-acl",
       `--jobs=${restoreJobs()}`,
       input,
     ];
     const { exitCode, stderr, stdout } = await runDocker(args, { quiet: true });
-    // pg_restore exits 1 for warnings (--clean on missing objects, etc.); fail on real errors
-    const hardFail =
-      exitCode > 1 ||
-      (exitCode === 1 &&
-        /pg_restore:\s*error:|ERROR:|FATAL:/i.test(stderr || stdout));
-    if (hardFail) {
+    const out = (stderr || stdout).trim();
+    // pg_restore: 0=ok; 1=non-fatal (warnings / ignored errors); >1 or FATAL=hard fail
+    if (exitCode === 0) return {};
+    if (exitCode > 1 || /FATAL:/i.test(out)) {
       throw new Error(
-        `pg_restore failed for ${db.user}@${db.host}/${db.database}:\n${stderr || stdout}`,
+        `pg_restore failed for ${db.user}@${db.host}/${db.database}:\n${out}`,
       );
     }
-    return;
+    if (exitCode === 1) {
+      const hasError = /pg_restore:\s*error:|ERROR:/i.test(out);
+      const errorsIgnored = /errors ignored on restore/i.test(out);
+      if (hasError && !errorsIgnored) {
+        throw new Error(
+          `pg_restore failed for ${db.user}@${db.host}/${db.database}:\n${out}`,
+        );
+      }
+      if (hasError && errorsIgnored && out) {
+        return { warnings: out };
+      }
+      return {};
+    }
+    throw new Error(
+      `pg_restore failed for ${db.user}@${db.host}/${db.database}:\n${out}`,
+    );
   }
 
   const client = engine === "mariadb" ? "mariadb" : "mysql";
@@ -489,6 +614,7 @@ export async function restoreDatabase(
       `${client} restore failed for ${db.user}@${db.host}/${db.database}:\n${stderr || stdout}`,
     );
   }
+  return {};
 }
 
 export { maintenanceDb };
