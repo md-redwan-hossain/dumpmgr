@@ -1,6 +1,14 @@
+import { mkdir } from "node:fs/promises";
+import { dirname, join, relative, resolve } from "node:path";
 import * as p from "@clack/prompts";
-import type { Config, DatabaseItem, Engine } from "./config.ts";
-import { ENGINES, engineItemCount, needsMaster } from "./config.ts";
+import type { Config, DatabaseItem, Engine, TreeDatabaseOption } from "./config.ts";
+import {
+  ENGINES,
+  engineItemCount,
+  engineRestoreTreeItems,
+  needsMaster,
+} from "./config.ts";
+import { listDumpBrowserEntries } from "./dumps.ts";
 import type { Session } from "./metadata.ts";
 import { getDbPassword, setDbPassword } from "./metadata.ts";
 
@@ -64,6 +72,10 @@ export async function selectEngine(config: Config, minItems: number): Promise<En
   return choice;
 }
 
+function itemHint(db: DatabaseItem): string {
+  return `${db.user}@${db.host}:${db.port}/${db.database}`;
+}
+
 export async function selectDatabaseItem(
   items: DatabaseItem[],
   message: string,
@@ -78,11 +90,44 @@ export async function selectDatabaseItem(
     options: list.map((db) => ({
       value: db.key,
       label: db.key,
-      hint: `${db.user}@${db.host}:${db.port}/${db.name}`,
+      hint: itemHint(db),
     })),
   });
   if (p.isCancel(choice)) onCancel();
   return list.find((i) => i.key === choice)!;
+}
+
+export async function selectDatabaseTree(
+  config: Config,
+  engine: Engine,
+  message: string,
+  exclude?: string,
+): Promise<DatabaseItem> {
+  const tree = engineRestoreTreeItems(config, engine).filter(
+    (i) => i.key !== exclude,
+  );
+  if (tree.length === 0) {
+    throw new Error("No databases available to select.");
+  }
+  const choice = await p.select({
+    message,
+    options: tree.map((db: TreeDatabaseOption) => {
+      const leaf = db.nested ? db.key.split(":").pop()! : db.key;
+      const label = db.nested ? `  └ ${leaf}` : leaf;
+      return {
+        value: db.key,
+        label,
+        hint: db.disabled ? "readonly" : itemHint(db),
+        disabled: db.disabled === true,
+      };
+    }),
+  });
+  if (p.isCancel(choice)) onCancel();
+  const selected = tree.find((i) => i.key === choice)!;
+  if (selected.disabled) {
+    throw new Error(`"${selected.key}" is readonly and cannot be a restore destination.`);
+  }
+  return selected;
 }
 
 export async function promptPassword(message: string): Promise<string> {
@@ -105,6 +150,35 @@ export async function confirmOrYes(
   const result = await p.confirm({ message, initialValue });
   if (p.isCancel(result)) onCancel();
   return result;
+}
+
+export type NestedRestoreAction = "yes" | "no" | "drop" | "create";
+
+export async function selectNestedRestoreAction(
+  message: string,
+  childExists: boolean,
+): Promise<NestedRestoreAction> {
+  const options = childExists
+    ? [
+        { value: "yes" as const, label: "Yes", hint: "Restore into existing database" },
+        {
+          value: "drop" as const,
+          label: "Drop database and restore",
+          hint: "DROP → CREATE → restore",
+        },
+        { value: "no" as const, label: "No" },
+      ]
+    : [
+        {
+          value: "create" as const,
+          label: "Create database and restore",
+          hint: "CREATE → restore",
+        },
+        { value: "no" as const, label: "No" },
+      ];
+  const choice = await p.select({ message, options });
+  if (p.isCancel(choice)) onCancel();
+  return choice;
 }
 
 export async function resolveDbPassword(opts: {
@@ -159,17 +233,52 @@ export async function connectWithRetry(opts: {
   }
 }
 
-export async function selectDumpFile(
-  files: string[],
-  message: string,
+/** Interactive dump browser under rootDir. Returns absolute dump file path. */
+export async function browseDumpFile(
+  rootDir: string,
+  encryptedOnly: boolean,
 ): Promise<string> {
-  if (files.length === 0) {
-    throw new Error("No dump files found in that folder.");
+  await mkdir(rootDir, { recursive: true });
+  const root = resolve(rootDir);
+  let cwd = root;
+
+  for (;;) {
+    const rel = relative(root, cwd) || ".";
+    const entries = await listDumpBrowserEntries(cwd, encryptedOnly);
+    const options: { value: string; label: string; hint?: string }[] = [];
+
+    if (cwd !== root) {
+      options.push({ value: "..", label: "..", hint: "Parent folder" });
+    }
+    for (const e of entries) {
+      if (e.kind === "dir") {
+        options.push({ value: `dir:${e.name}`, label: `${e.name}/`, hint: "Folder" });
+      } else {
+        options.push({ value: `file:${e.name}`, label: e.name });
+      }
+    }
+
+    if (options.length === 0) {
+      throw new Error(`No dump files or folders under ${root}`);
+    }
+
+    const choice = await p.select({
+      message: `Browse dumps (${rel})`,
+      options,
+    });
+    if (p.isCancel(choice)) onCancel();
+
+    if (choice === "..") {
+      cwd = dirname(cwd);
+      if (!cwd.startsWith(root)) cwd = root;
+      continue;
+    }
+    if (choice.startsWith("dir:")) {
+      cwd = join(cwd, choice.slice(4));
+      continue;
+    }
+    if (choice.startsWith("file:")) {
+      return join(cwd, choice.slice(5));
+    }
   }
-  const choice = await p.select({
-    message,
-    options: files.map((f) => ({ value: f, label: f })),
-  });
-  if (p.isCancel(choice)) onCancel();
-  return choice;
 }

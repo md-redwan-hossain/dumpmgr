@@ -35,9 +35,11 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # dbsync
 config.json
-metadata.json
+metadata
 dumps/
 .dbsync
 *.dump
 *.sql
 *.enc
+dbsync*
+

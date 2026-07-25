@@ -69,7 +69,7 @@ export async function runInit(opts: InitOptions): Promise<void> {
 
     if (hasMaster) {
       const action = await p.select({
-        message: "Existing master password found in metadata.json",
+        message: "Existing master password found in metadata",
         options: [
           {
             value: "change",
@@ -109,7 +109,7 @@ export async function runInit(opts: InitOptions): Promise<void> {
 
   p.log.success(`Wrote ${configPath}`);
   if (needsMaster(config)) {
-    p.log.success(`metadata.json ready at ${metaPath}`);
+    p.log.success(`metadata ready at ${metaPath}`);
   } else {
     p.log.success(`Wrote ${metaPath}`);
   }

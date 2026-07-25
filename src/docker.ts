@@ -116,7 +116,7 @@ export async function verifyConnection(
   opts?: { database?: string },
 ): Promise<void> {
   const host = dockerHost(db.host);
-  const database = opts?.database ?? db.name;
+  const database = opts?.database ?? db.database;
 
   if (engine === "postgres") {
     const args = [
@@ -175,7 +175,7 @@ export async function databaseExists(
   const host = dockerHost(db.host);
 
   if (engine === "postgres") {
-    const sql = `SELECT 1 FROM pg_database WHERE datname='${db.name.replaceAll("'", "''")}'`;
+    const sql = `SELECT 1 FROM pg_database WHERE datname='${db.database.replaceAll("'", "''")}'`;
     const args = [
       ...pgBaseArgs(image, db.password),
       "psql",
@@ -200,7 +200,7 @@ export async function databaseExists(
   }
 
   const client = engine === "mariadb" ? "mariadb" : "mysql";
-  const sql = `SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='${db.name.replaceAll("'", "''")}'`;
+  const sql = `SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='${db.database.replaceAll("'", "''")}'`;
   const args = [
     ...mysqlBaseArgs(image, db.password),
     client,
@@ -223,7 +223,7 @@ export async function databaseExists(
       `Failed to check if database exists on ${db.host}:${db.port}:\n${stderr || stdout}`,
     );
   }
-  return stdout.trim() === db.name;
+  return stdout.trim() === db.database;
 }
 
 export async function createDatabase(
@@ -234,7 +234,7 @@ export async function createDatabase(
   const host = dockerHost(db.host);
 
   if (engine === "postgres") {
-    const sql = `CREATE DATABASE ${quoteIdent(db.name)}`;
+    const sql = `CREATE DATABASE ${quoteIdent(db.database)}`;
     const args = [
       ...pgBaseArgs(image, db.password),
       "psql",
@@ -254,14 +254,14 @@ export async function createDatabase(
     const { exitCode, stderr, stdout } = await runDocker(args, { quiet: true });
     if (exitCode !== 0) {
       throw new Error(
-        `Failed to create database "${db.name}":\n${stderr || stdout}`,
+        `Failed to create database "${db.database}":\n${stderr || stdout}`,
       );
     }
     return;
   }
 
   const client = engine === "mariadb" ? "mariadb" : "mysql";
-  const sql = `CREATE DATABASE ${quoteMysqlIdent(db.name)}`;
+  const sql = `CREATE DATABASE ${quoteMysqlIdent(db.database)}`;
   const args = [
     ...mysqlBaseArgs(image, db.password),
     client,
@@ -279,7 +279,69 @@ export async function createDatabase(
   const { exitCode, stderr, stdout } = await runDocker(args, { quiet: true });
   if (exitCode !== 0) {
     throw new Error(
-      `Failed to create database "${db.name}":\n${stderr || stdout}`,
+      `Failed to create database "${db.database}":\n${stderr || stdout}`,
+    );
+  }
+}
+
+export async function dropDatabase(
+  engine: Engine,
+  image: string,
+  db: ResolvedDb,
+): Promise<void> {
+  const host = dockerHost(db.host);
+
+  if (engine === "postgres") {
+    const esc = db.database.replaceAll("'", "''");
+    const terminate = `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${esc}' AND pid <> pg_backend_pid()`;
+    const drop = `DROP DATABASE IF EXISTS ${quoteIdent(db.database)}`;
+    for (const sql of [terminate, drop]) {
+      const args = [
+        ...pgBaseArgs(image, db.password),
+        "psql",
+        "--host",
+        host,
+        "--port",
+        String(db.port),
+        "--username",
+        db.user,
+        "--dbname",
+        "postgres",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-c",
+        sql,
+      ];
+      const { exitCode, stderr, stdout } = await runDocker(args, { quiet: true });
+      if (exitCode !== 0) {
+        throw new Error(
+          `Failed to drop database "${db.database}":\n${stderr || stdout}`,
+        );
+      }
+    }
+    return;
+  }
+
+  const client = engine === "mariadb" ? "mariadb" : "mysql";
+  const sql = `DROP DATABASE IF EXISTS ${quoteMysqlIdent(db.database)}`;
+  const args = [
+    ...mysqlBaseArgs(image, db.password),
+    client,
+    "--host",
+    host,
+    "--port",
+    String(db.port),
+    "--user",
+    db.user,
+    "--database",
+    "mysql",
+    "--execute",
+    sql,
+  ];
+  const { exitCode, stderr, stdout } = await runDocker(args, { quiet: true });
+  if (exitCode !== 0) {
+    throw new Error(
+      `Failed to drop database "${db.database}":\n${stderr || stdout}`,
     );
   }
 }
@@ -304,7 +366,7 @@ export async function dumpDatabase(
       `--host=${host}`,
       `--port=${db.port}`,
       `--username=${db.user}`,
-      `--dbname=${db.name}`,
+      `--dbname=${db.database}`,
       "--format=custom",
       `--compress=${DUMP_COMPRESS}`,
       `--file=${out}`,
@@ -312,7 +374,7 @@ export async function dumpDatabase(
     const { exitCode, stderr, stdout } = await runDocker(args, { quiet: true });
     if (exitCode !== 0) {
       throw new Error(
-        `pg_dump failed for ${db.user}@${db.host}/${db.name}:\n${stderr || stdout}`,
+        `pg_dump failed for ${db.user}@${db.host}/${db.database}:\n${stderr || stdout}`,
       );
     }
     return;
@@ -329,13 +391,13 @@ export async function dumpDatabase(
     "--routines",
     "--triggers",
     "--databases",
-    db.name,
+    db.database,
     `--result-file=${out}`,
   ];
   const { exitCode, stderr, stdout } = await runDocker(args, { quiet: true });
   if (exitCode !== 0) {
     throw new Error(
-      `${dumpCmd} failed for ${db.user}@${db.host}/${db.name}:\n${stderr || stdout}`,
+      `${dumpCmd} failed for ${db.user}@${db.host}/${db.database}:\n${stderr || stdout}`,
     );
   }
 }
@@ -359,7 +421,7 @@ export async function restoreDatabase(
       `--host=${host}`,
       `--port=${db.port}`,
       `--username=${db.user}`,
-      `--dbname=${db.name}`,
+      `--dbname=${db.database}`,
       "--clean",
       "--if-exists",
       "--no-owner",
@@ -371,7 +433,7 @@ export async function restoreDatabase(
     // pg_restore often exits 1 with warnings; treat only hard failures
     if (exitCode !== 0 && exitCode !== 1) {
       throw new Error(
-        `pg_restore failed for ${db.user}@${db.host}/${db.name}:\n${stderr || stdout}`,
+        `pg_restore failed for ${db.user}@${db.host}/${db.database}:\n${stderr || stdout}`,
       );
     }
     if (exitCode === 1 && /fatal|error:/i.test(stderr) && !/warning:/i.test(stderr)) {
@@ -397,7 +459,7 @@ export async function restoreDatabase(
   const { exitCode, stderr, stdout } = await runDocker(args, { quiet: true });
   if (exitCode !== 0) {
     throw new Error(
-      `${client} restore failed for ${db.user}@${db.host}/${db.name}:\n${stderr || stdout}`,
+      `${client} restore failed for ${db.user}@${db.host}/${db.database}:\n${stderr || stdout}`,
     );
   }
 }
