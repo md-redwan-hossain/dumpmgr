@@ -1,24 +1,24 @@
-# dbsync
+# dumpmgr
 
-Dump and sync **Postgres**, **MySQL**, and **MariaDB** databases through Docker, with interactive prompts, optional encrypted dumps, and AES-wrapped remembered DB passwords.
+**Dump Manager** — dump and restore **Postgres**, **MySQL**, and **MariaDB** databases through Docker, with interactive prompts, optional encrypted dumps, and AES-wrapped remembered DB passwords.
 
 ## Setup
 
 ```powershell
 bun install
-bun run dbsync init
+bun run dumpmgr config init
 # prompts: populate with fake sample data? then master password
 # or skip the fake-data prompt:
-bun run dbsync init --with-fake-data
+bun run dumpmgr config init --with-fake-data
 # edit config.json, then:
-bun run dbsync
+bun run dumpmgr
 # or lock the engine:
-bun run dbsync pg
+bun run dumpmgr pg
 ```
 
 Requires Docker. Prefer official Debian-based images (e.g. `postgres:18`, `mysql:8`, `mariadb:11`). Avoid `*-alpine` Postgres images.
 
-`init` creates `config.json` and a binary `metadata` file in the same directory. There is no example config file — use `init`.
+`config init` creates `config.json` and a binary `metadata` file in the same directory. There is no example config file — use `config init`.
 
 ## Commands / flags
 
@@ -28,16 +28,20 @@ Requires Docker. Prefer official Debian-based images (e.g. `postgres:18`, `mysql
 | `pg` / `postgres` | Same, locked to Postgres (skips engine prompt) |
 | `mysql` | Locked to MySQL |
 | `mariadb` | Locked to MariaDB |
-| `init` | Scaffold `config.json` + binary `metadata` (asks about fake data) |
-| `init --with-fake-data` | Same, but skip the fake-data prompt and use samples |
+| `config init` | Scaffold `config.json` + binary `metadata` (asks about fake data) |
+| `config init --with-fake-data` | Same, but skip the fake-data prompt and use samples |
+| `config validate` | Validate `config.json` and print a summary report |
+| `config lint` | Format `config.json` in place (2-space indent) |
 | `-c, --config <path>` | Config path (default: `config.json`) |
 | `--yes` | Skip overwrite confirms; auto-create missing destination DB (flat restore only; never auto-drops) |
 
 ```powershell
-bun run dbsync
-bun run dbsync pg
-bun run dbsync -c .\config.json --yes
-bun run dbsync init --with-fake-data
+bun run dumpmgr
+bun run dumpmgr pg
+bun run dumpmgr -c .\config.json --yes
+bun run dumpmgr config init --with-fake-data
+bun run dumpmgr config validate
+bun run dumpmgr config lint
 ```
 
 ## Config
@@ -65,7 +69,6 @@ bun run dbsync init --with-fake-data
         "readonly": true,
         "items": {
           "dump": {
-            "user": "retailr_user",
             "database": "retailr_db_copy"
           }
         }
@@ -93,13 +96,13 @@ bun run dbsync init --with-fake-data
 
 ### Nested items (one level)
 
-A parent may include nested `items`. Children only set `user` + `database` and **inherit** parent `host` / `port`.
+A parent may include nested `items`. Children set `database` (and optionally `user`) and **inherit** parent `host` / `port`. Omit child `user` to use the parent's user.
 
 - Runtime key: `parent:child` (e.g. `local_dev_docker:dump`)
 - Password metadata key: `postgres:local_dev_docker:dump`
 - Dump folder: `dumps/postgres/local_dev_docker/dump/`
 
-`init` always emits `"readonly": false` on scaffolded top-level entries.
+`config init` always emits `"readonly": false` on scaffolded top-level entries.
 
 ### `readonly`
 
@@ -109,7 +112,7 @@ Only meaningful on parents that have nested `items` (destination / restore tree)
 |---------|--------------------------|
 | `readonly: true` + nested items | Parent shown but **not selectable**; only nested children can be chosen |
 | `readonly: true` + no nested items | Entry hidden entirely |
-| `readonly: false` | Parent (if it has user+database) and children shown |
+| `readonly: false` | Parent and children shown |
 
 Dump source picker can still select the parent even when `readonly` is true.
 
@@ -117,7 +120,7 @@ If `dumpDirectory` already ends with a `dumps` segment, that path is used as the
 
 ## Security / metadata
 
-When `rememberPassword` or `encryptedDump` is true, you set a **master password** at `init` and enter it on each run.
+When `rememberPassword` or `encryptedDump` is true, you set a **master password** at `config init` and enter it on each run.
 
 | Secret | Storage |
 |--------|---------|
@@ -193,4 +196,4 @@ Cross-engine sync (e.g. Postgres → MySQL) is not supported.
 
 ## Missing config
 
-If `config.json` is missing, dbsync shows an error and offers to run **init** with or without fake data, then exits so you can edit the config before syncing.
+If `config.json` is missing, dumpmgr shows an error and offers to run **config init** with or without fake data, then exits so you can edit the config before dumping/restoring.

@@ -11,11 +11,13 @@ import {
   engineItemCount,
   engineItems,
   getParentItem,
+  lintConfigFile,
   loadConfigAsync,
   needsMaster,
   type Config,
   type DatabaseItem,
   type Engine,
+  validateConfigFile,
 } from "./config.ts";
 import {
   assertDockerAvailable,
@@ -524,7 +526,7 @@ async function runMode(
       if (!session?.aesKey) throw new Error("AES key required to decrypt dump");
       tempPlain = join(
         dir,
-        `.dbsync-decrypt-${Date.now()}_${plainTempNameFromEncrypted(fileName)}`,
+        `.dumpmgr-decrypt-${Date.now()}_${plainTempNameFromEncrypted(fileName)}`,
       );
       p.log.step("Decrypting dump…");
       await decryptDumpToTemp(join(dir, fileName), session.aesKey, tempPlain);
@@ -655,7 +657,7 @@ async function runMain(opts: GlobalOpts): Promise<void> {
   }
 
   const engineLabel = opts.engine ? ` (${opts.engine})` : "";
-  p.intro(`dbsync — docker based db dump & sync tool${engineLabel}`);
+  p.intro(`dumpmgr — Dump Manager, docker based db dump & restore tool${engineLabel}`);
   if (opts.debug) p.log.info("Debug mode on");
 
   try {
@@ -670,7 +672,7 @@ async function runMain(opts: GlobalOpts): Promise<void> {
   if (!(await configExists(configPath))) {
     p.log.error(`Config file not found: ${configPath}`);
     const choice = await p.select({
-      message: "Run init to create config?",
+      message: "Run config init to create config?",
       options: [
         { value: "fake", label: "Init with fake data" },
         { value: "empty", label: "Init with empty items" },
@@ -764,9 +766,9 @@ program.enablePositionalOptions();
 
 addCommonOptions(
   program
-    .name("dbsync")
+    .name("dumpmgr")
     .description(
-      "Dump and sync Postgres / MySQL / MariaDB databases via Docker",
+      "Dump Manager — dump and restore Postgres / MySQL / MariaDB databases via Docker",
     ),
 ).action(async (opts: GlobalOpts) => {
   await handleMain(opts);
@@ -778,7 +780,7 @@ function addEngineCommand(name: string, engine: Engine, aliases?: string[]) {
   const cmd = addCommonOptions(
     program
       .command(name)
-      .description(`Run dbsync locked to ${engine}`)
+      .description(`Run dumpmgr locked to ${engine}`)
       .enablePositionalOptions(),
   ).action(async (opts: { config: string; yes?: boolean; debug?: boolean }) => {
     await handleMain({
@@ -798,19 +800,63 @@ addEngineCommand("pg", "postgres", ["postgres"]);
 addEngineCommand("mysql", "mysql");
 addEngineCommand("mariadb", "mariadb");
 
-program
+const configCmd = program
+  .command("config")
+  .description("Manage config.json");
+
+configCmd
   .command("init")
   .description("Scaffold config.json and metadata")
   .option("-c, --config <path>", "Path to config.json", "config.json")
   .option("--with-fake-data", "Skip prompt; populate sample database items", false)
   .action(async (opts: { config: string; withFakeData: boolean }) => {
     try {
-      p.intro("dbsync init");
+      p.intro("dumpmgr config init");
       await runInit({
         config: resolve(opts.config),
         // only skip the prompt when the flag is explicitly set
         withFakeData: opts.withFakeData ? true : undefined,
       });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      p.log.error(message);
+      process.exit(1);
+    }
+  });
+
+configCmd
+  .command("validate")
+  .description("Validate config.json and print a summary report")
+  .option("-c, --config <path>", "Path to config.json", "config.json")
+  .action(async (opts: { config: string }) => {
+    const configPath = resolve(opts.config);
+    p.intro("dumpmgr config validate");
+    const result = await validateConfigFile(configPath);
+    if (!result.ok) {
+      for (const issue of result.issues) p.log.error(issue);
+      p.outro("config invalid");
+      process.exit(1);
+    }
+    for (const line of result.report) {
+      if (line) p.log.info(line);
+    }
+    for (const w of result.warnings) p.log.warn(w);
+    p.outro(
+      result.warnings.length > 0 ? "config ok (with warnings)" : "config ok",
+    );
+  });
+
+configCmd
+  .command("lint")
+  .description("Format config.json in place")
+  .option("-c, --config <path>", "Path to config.json", "config.json")
+  .action(async (opts: { config: string }) => {
+    const configPath = resolve(opts.config);
+    p.intro("dumpmgr config lint");
+    try {
+      await lintConfigFile(configPath);
+      p.log.success(`Formatted ${configPath}`);
+      p.outro("done");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       p.log.error(message);

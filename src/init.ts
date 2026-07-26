@@ -115,7 +115,7 @@ export async function runInit(opts: InitOptions): Promise<void> {
   }
   p.outro(
     withFakeData
-      ? "Edit config.json (replace fake hosts/users) before running dbsync."
-      : "Add database items to config.json, then run dbsync.",
+      ? "Edit config.json (replace fake hosts/users) before running dumpmgr."
+      : "Add database items to config.json, then run dumpmgr.",
   );
 }

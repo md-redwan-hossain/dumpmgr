@@ -142,7 +142,7 @@ export async function unlockSession(
 ): Promise<Session> {
   let metadata = await loadMetadata(metadataPath);
   if (!metadata.masterPassword || !metadata.kdfSalt) {
-    throw new Error("metadata has no master password; run init again");
+    throw new Error("metadata has no master password; run config init again");
   }
   if (!metadata.encId) {
     metadata = { ...metadata, encId: newEncId() };

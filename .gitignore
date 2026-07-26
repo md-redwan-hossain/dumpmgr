@@ -33,13 +33,13 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Finder (MacOS) folder config
 .DS_Store
 
-# dbsync
+# dumpmgr
 config.json
 metadata
 dumps/
-.dbsync
+.dumpmgr
 *.dump
 *.sql
 *.enc
-dbsync*
+dumpmgr*
 

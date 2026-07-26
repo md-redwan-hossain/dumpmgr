@@ -407,13 +407,13 @@ export async function ensureDatabaseLogin(
     const pwLit = quoteLiteral(opts.password);
     const dbIdent = quoteIdent(opts.database);
     const ensureRole = [
-      `DO $dbsync$ BEGIN`,
+      `DO $dumpmgr$ BEGIN`,
       `  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${roleLit}) THEN`,
       `    CREATE ROLE ${role} LOGIN PASSWORD ${pwLit};`,
       `  ELSE`,
       `    ALTER ROLE ${role} PASSWORD ${pwLit};`,
       `  END IF;`,
-      `END $dbsync$`,
+      `END $dumpmgr$`,
     ].join(" ");
     const grantDb = `GRANT ALL PRIVILEGES ON DATABASE ${dbIdent} TO ${role}`;
     const grantSchema = `GRANT ALL ON SCHEMA public TO ${role}`;

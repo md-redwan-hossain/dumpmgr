@@ -11,7 +11,8 @@ export const DEFAULT_IMAGES: Record<Engine, string> = {
 
 export const ChildDatabaseSchema = z
   .object({
-    user: z.string().min(1),
+    /** Omit to inherit parent user. */
+    user: z.string().min(1).optional(),
     database: z.string().min(1),
   })
   .strict();
@@ -22,28 +23,12 @@ export const DatabaseEntrySchema = z
   .object({
     host: z.string().min(1),
     port: z.number().int().min(1).max(65535),
-    user: z.string().min(1).optional(),
-    database: z.string().min(1).optional(),
+    user: z.string().min(1),
+    database: z.string().min(1),
     readonly: z.boolean().default(false),
     items: z.record(z.string(), ChildDatabaseSchema).optional(),
   })
-  .strict()
-  .superRefine((entry, ctx) => {
-    const hasSelf = Boolean(entry.user && entry.database);
-    const hasChildren = entry.items && Object.keys(entry.items).length > 0;
-    if (!hasSelf && !hasChildren) {
-      ctx.addIssue({
-        code: "custom",
-        message: "Need user+database and/or non-empty items",
-      });
-    }
-    if ((entry.user && !entry.database) || (!entry.user && entry.database)) {
-      ctx.addIssue({
-        code: "custom",
-        message: "user and database must both be set together",
-      });
-    }
-  });
+  .strict();
 
 export type DatabaseEntry = z.infer<typeof DatabaseEntrySchema>;
 
@@ -94,23 +79,21 @@ export function engineItems(config: Config, engine: Engine): DatabaseItem[] {
   const entries = config[engine]?.items ?? {};
   const out: DatabaseItem[] = [];
   for (const [key, entry] of Object.entries(entries)) {
-    if (entry.user && entry.database) {
-      out.push({
-        key,
-        host: entry.host,
-        port: entry.port,
-        user: entry.user,
-        database: entry.database,
-        nested: false,
-      });
-    }
+    out.push({
+      key,
+      host: entry.host,
+      port: entry.port,
+      user: entry.user,
+      database: entry.database,
+      nested: false,
+    });
     if (entry.items) {
       for (const [childKey, child] of Object.entries(entry.items)) {
         out.push({
           key: `${key}:${childKey}`,
           host: entry.host,
           port: entry.port,
-          user: child.user,
+          user: child.user ?? entry.user,
           database: child.database,
           nested: true,
           parentKey: key,
@@ -138,45 +121,30 @@ export function engineRestoreTreeItems(
   for (const [key, entry] of Object.entries(entries)) {
     const children = entry.items ? Object.entries(entry.items) : [];
     const hasChildren = children.length > 0;
-    const hasSelf = Boolean(entry.user && entry.database);
 
     if (entry.readonly && !hasChildren) continue;
 
-    if (hasSelf) {
-      out.push({
-        key,
-        host: entry.host,
-        port: entry.port,
-        user: entry.user!,
-        database: entry.database!,
-        nested: false,
-        depth: 0,
-        disabled: entry.readonly || undefined,
-      });
-    } else if (entry.readonly && hasChildren) {
-      // Connection-only readonly parent: still show a disabled header
-      out.push({
-        key,
-        host: entry.host,
-        port: entry.port,
-        user: children[0]![1].user,
-        database: "(readonly)",
-        nested: false,
-        depth: 0,
-        disabled: true,
-      });
-    }
+    out.push({
+      key,
+      host: entry.host,
+      port: entry.port,
+      user: entry.user,
+      database: entry.database,
+      nested: false,
+      depth: 0,
+      disabled: entry.readonly || undefined,
+    });
 
     for (const [childKey, child] of children) {
       out.push({
         key: `${key}:${childKey}`,
         host: entry.host,
         port: entry.port,
-        user: child.user,
+        user: child.user ?? entry.user,
         database: child.database,
         nested: true,
         parentKey: key,
-        depth: hasSelf || entry.readonly ? 1 : 0,
+        depth: 1,
       });
     }
   }
@@ -193,7 +161,7 @@ export function getParentItem(
   parentKey: string,
 ): DatabaseItem | null {
   const entry = config[engine]?.items?.[parentKey];
-  if (!entry?.user || !entry.database) return null;
+  if (!entry) return null;
   return {
     key: parentKey,
     host: entry.host,
@@ -246,7 +214,6 @@ export function defaultConfigScaffold(withFakeData: boolean): Config {
           database: "app_db",
           items: {
             dump: {
-              user: "db_user",
               database: "app_db_dump",
             },
           },
@@ -282,19 +249,20 @@ export async function configExists(path: string): Promise<boolean> {
   return Bun.file(path).exists();
 }
 
-export async function loadConfigAsync(path: string): Promise<Config> {
+export async function readJsonFile(path: string): Promise<unknown> {
   const file = Bun.file(path);
   if (!(await file.exists())) {
     throw new Error(`Config file not found: ${path}`);
   }
-
-  let raw: unknown;
   try {
-    raw = await file.json();
+    return await file.json();
   } catch {
     throw new Error(`Invalid JSON in config file: ${path}`);
   }
+}
 
+export async function loadConfigAsync(path: string): Promise<Config> {
+  const raw = await readJsonFile(path);
   const result = ConfigSchema.safeParse(raw);
   if (!result.success) {
     const details = result.error.issues
@@ -311,4 +279,93 @@ export async function writeConfigAsync(
   config: Config,
 ): Promise<void> {
   await Bun.write(path, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+/** Format any valid JSON in place (2-space indent + trailing newline). */
+export async function lintConfigFile(path: string): Promise<void> {
+  const raw = await readJsonFile(path);
+  await Bun.write(path, `${JSON.stringify(raw, null, 2)}\n`);
+}
+
+export type ConfigValidateResult =
+  | { ok: true; config: Config; report: string[]; warnings: string[] }
+  | { ok: false; issues: string[] };
+
+export async function validateConfigFile(
+  path: string,
+): Promise<ConfigValidateResult> {
+  let raw: unknown;
+  try {
+    raw = await readJsonFile(path);
+  } catch (err) {
+    return {
+      ok: false,
+      issues: [err instanceof Error ? err.message : String(err)],
+    };
+  }
+
+  const result = ConfigSchema.safeParse(raw);
+  if (!result.success) {
+    return {
+      ok: false,
+      issues: result.error.issues.map(
+        (i) => `${i.path.join(".") || "(root)"}: ${i.message}`,
+      ),
+    };
+  }
+
+  const config = result.data;
+  const report: string[] = [
+    `rememberPassword: ${config.rememberPassword}`,
+    `encryptedDump: ${config.encryptedDump}`,
+    `dumpDirectory: ${config.dumpDirectory}`,
+  ];
+  const warnings: string[] = [];
+  let totalItems = 0;
+
+  for (const engine of ENGINES) {
+    const section = config[engine];
+    if (!section) continue;
+
+    const image = section.image ?? DEFAULT_IMAGES[engine];
+    const entries = Object.entries(section.items);
+    const nestedCount = entries.reduce(
+      (n, [, e]) => n + Object.keys(e.items ?? {}).length,
+      0,
+    );
+    totalItems += entries.length + nestedCount;
+
+    report.push("");
+    report.push(
+      `${engine}  image=${image}  parents=${entries.length}  nested=${nestedCount}`,
+    );
+
+    if (entries.length === 0) {
+      warnings.push(`${engine}: no database items`);
+    }
+    if (image.toLowerCase().includes("alpine")) {
+      warnings.push(`${engine}: image contains "alpine" (${image})`);
+    }
+
+    for (const [key, entry] of entries) {
+      const ro = entry.readonly ? "  readonly" : "";
+      report.push(
+        `  ${key} → ${entry.host}:${entry.port}  ${entry.user} / ${entry.database}${ro}`,
+      );
+      if (entry.items) {
+        for (const [childKey, child] of Object.entries(entry.items)) {
+          const user = child.user ?? entry.user;
+          report.push(
+            `    ${key}:${childKey} → ${entry.host}:${entry.port}  ${user} / ${child.database}`,
+          );
+        }
+      }
+    }
+  }
+
+  if (totalItems === 0) {
+    warnings.push("no database items configured in any engine");
+  }
+
+  return { ok: true, config, report, warnings };
 }

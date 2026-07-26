@@ -16,7 +16,7 @@ export async function ensureDumpsRootWritable(dumpsRoot: string): Promise<void> 
   } catch {
     throw new Error(`Dumps directory is not writable: ${dumpsRoot}`);
   }
-  const probe = join(dumpsRoot, `.dbsync-write-test-${Date.now()}`);
+  const probe = join(dumpsRoot, `.dumpmgr-write-test-${Date.now()}`);
   try {
     await writeFile(probe, "ok");
     await rm(probe);
