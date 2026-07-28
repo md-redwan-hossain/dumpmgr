@@ -19,6 +19,7 @@ import {
   type Engine,
   validateConfigFile,
 } from "./config.ts";
+import { runDoctor } from "./doctor.ts";
 import {
   assertDockerAvailable,
   createDatabase,
@@ -52,6 +53,7 @@ import {
 import { runInit } from "./init.ts";
 import {
   changeMasterPassword,
+  deleteDbPassword,
   getDbPassword,
   metadataPathForConfig,
   setDbPassword,
@@ -160,12 +162,9 @@ async function runDumpWithSpinner(
   }, 100);
   try {
     await dumpDatabase(engine, image, db, workdir, dumpFileName);
-  } catch (err) {
+  } finally {
     clearInterval(tick);
-    spinner.fail("Dump failed");
-    throw err;
   }
-  clearInterval(tick);
   const elapsedMs = performance.now() - t0;
   const size = Bun.file(dumpPath).size;
   spinner.succeed(
@@ -203,12 +202,9 @@ async function runRestoreWithSpinner(
       opts,
     );
     warnings = result.warnings;
-  } catch (err) {
+  } finally {
     clearInterval(tick);
-    spinner.fail("Restore failed");
-    throw err;
   }
-  clearInterval(tick);
   const elapsedMs = performance.now() - t0;
   spinner.succeed(`Restore complete in ${formatDuration(elapsedMs)}`);
   if (warnings) {
@@ -688,6 +684,13 @@ async function runMain(opts: GlobalOpts): Promise<void> {
   }
 
   const config = await loadConfigAsync(configPath);
+  if (config.encryptedDump && !config.rememberPassword) {
+    p.log.warn(
+      `encryptedDump is true but rememberPassword is false. ` +
+        `Encrypted dumps need the master-derived AES key, so set ` +
+        `"rememberPassword": true in config.json (or disable encryptedDump).`,
+    );
+  }
   let session = await unlockOrNull(config, configPath);
 
   if (opts.mode) {
@@ -769,6 +772,17 @@ addCommonOptions(
     .name("dumpmgr")
     .description(
       "Dump Manager — dump and restore Postgres / MySQL / MariaDB databases via Docker",
+    )
+    .addHelpText(
+      "after",
+      [
+        "Auxiliary commands:",
+        "  doctor              Check Docker / dumps dir / metadata integrity",
+        "  secret list         List stored DB password keys (no values)",
+        "  secret wipe <key>   Remove a stored DB password by key",
+        "  config {init|validate|lint}",
+        "  pg / mysql / mariadb  Lock the default action to one engine",
+      ].join("\n"),
     ),
 ).action(async (opts: GlobalOpts) => {
   await handleMain(opts);
@@ -799,6 +813,155 @@ function addEngineCommand(name: string, engine: Engine, aliases?: string[]) {
 addEngineCommand("pg", "postgres", ["postgres"]);
 addEngineCommand("mysql", "mysql");
 addEngineCommand("mariadb", "mariadb");
+
+// `dumpmgr doctor` — environment + metadata health check (no master unlock).
+program
+  .command("doctor")
+  .description(
+    "Check Docker daemon, dumps dir permissions, and metadata integrity",
+  )
+  .option("-c, --config <path>", "Path to config.json", "config.json")
+  .action(async (opts: { config: string }) => {
+    const configPath = resolve(opts.config);
+    p.intro("dumpmgr doctor");
+    if (!(await configExists(configPath))) {
+      p.log.error(`Config file not found: ${configPath}`);
+      p.outro("config missing");
+      process.exit(1);
+    }
+    let config: Config;
+    try {
+      config = await loadConfigAsync(configPath);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      p.log.error(message);
+      p.outro("config invalid");
+      process.exit(1);
+    }
+    const report = await runDoctor(config, configPath);
+    for (const check of report.checks) {
+      if (check.ok) {
+        p.log.success(`${check.name}: ${check.message}`);
+      } else {
+        p.log.error(`${check.name}: ${check.message}`);
+        if (check.hint) p.log.warn(`  hint: ${check.hint}`);
+      }
+    }
+    p.outro(report.ok ? "doctor ok" : "doctor found problems");
+    if (!report.ok) process.exit(1);
+  });
+
+// `dumpmgr secret list` / `dumpmgr secret wipe <key>` — inspect or remove
+// saved DB passwords (keys only; values stay encrypted at rest).
+const secretCmd = program
+  .command("secret")
+  .description("List or wipe saved DB passwords");
+
+async function unlockForSecretOps(
+  config: Config,
+  configPath: string,
+): Promise<Session | null> {
+  if (!needsMaster(config)) {
+    p.log.warn(
+      "metadata has no master password; nothing to list/wipe. " +
+        'Set "rememberPassword": true in config.json.',
+    );
+    return null;
+  }
+  return await unlockOrNull(config, configPath);
+}
+
+secretCmd
+  .command("list")
+  .description("List stored DB password keys (values are never shown)")
+  .option("-c, --config <path>", "Path to config.json", "config.json")
+  .action(async (opts: { config: string }) => {
+    const configPath = resolve(opts.config);
+    p.intro("dumpmgr secret list");
+    if (!(await configExists(configPath))) {
+      p.log.error(`Config file not found: ${configPath}`);
+      p.outro("config missing");
+      process.exit(1);
+    }
+    let config: Config;
+    try {
+      config = await loadConfigAsync(configPath);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      p.log.error(message);
+      p.outro("config invalid");
+      process.exit(1);
+    }
+    const session = await unlockForSecretOps(config, configPath);
+    if (!session) {
+      p.outro("nothing to list");
+      return;
+    }
+    const keys = Object.keys(session.metadata.dbPasswords).sort();
+    if (keys.length === 0) {
+      p.log.info("No saved DB passwords.");
+    } else {
+      for (const k of keys) p.log.info(k);
+    }
+    p.outro(`${keys.length} stored`);
+  });
+
+secretCmd
+  .command("wipe <key>")
+  .description("Remove a saved DB password by key (e.g. postgres:prod)")
+  .option("-c, --config <path>", "Path to config.json", "config.json")
+  .option("--yes", "Skip confirmation prompt")
+  .action(async (opts: { config: string; yes?: boolean }, args: { key: string }) => {
+    const configPath = resolve(opts.config);
+    const targetKey = args.key;
+    p.intro(`dumpmgr secret wipe ${targetKey}`);
+    if (!(await configExists(configPath))) {
+      p.log.error(`Config file not found: ${configPath}`);
+      p.outro("config missing");
+      process.exit(1);
+    }
+    let config: Config;
+    try {
+      config = await loadConfigAsync(configPath);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      p.log.error(message);
+      p.outro("config invalid");
+      process.exit(1);
+    }
+    const session = await unlockForSecretOps(config, configPath);
+    if (!session) {
+      p.outro("nothing to wipe");
+      return;
+    }
+    if (!(targetKey in session.metadata.dbPasswords)) {
+      p.log.warn(`"${targetKey}" is not stored.`);
+      p.outro("no change");
+      return;
+    }
+    if (!opts.yes) {
+      const ok = await p.confirm({
+        message: `Remove saved password for "${targetKey}"?`,
+        initialValue: false,
+      });
+      if (p.isCancel(ok)) onCancel();
+      if (!ok) {
+        p.log.warn("wipe cancelled");
+        p.outro("no change");
+        return;
+      }
+    }
+    const removed = await deleteDbPassword(session, targetKey);
+    if (removed) {
+      p.log.success(`Removed "${targetKey}".`);
+      p.log.info(
+        "Encrypted dumps remain unaffected (they use the master key, not per-DB passwords).",
+      );
+    } else {
+      p.log.warn(`"${targetKey}" was already gone.`);
+    }
+    p.outro("done");
+  });
 
 const configCmd = program
   .command("config")

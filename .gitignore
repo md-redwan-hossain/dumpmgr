@@ -42,4 +42,4 @@ dumps/
 *.sql
 *.enc
 dumpmgr*
-
+.puku/**

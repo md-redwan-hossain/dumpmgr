@@ -29,6 +29,8 @@ export type Session = {
 
 const MAGIC = new TextEncoder().encode("DBSM");
 const VERSION = 1;
+export const METADATA_MAGIC = MAGIC;
+export const METADATA_VERSION = VERSION;
 
 export function newEncId(): string {
   return crypto.randomUUID().replaceAll("-", "").toUpperCase();
@@ -181,6 +183,17 @@ export async function setDbPassword(
     password,
   );
   await writeMetadata(session.metadataPath, session.metadata);
+}
+
+/** Remove a stored DB password. No-op (and no write) if the key isn't present. */
+export async function deleteDbPassword(
+  session: Session,
+  key: string,
+): Promise<boolean> {
+  if (!(key in session.metadata.dbPasswords)) return false;
+  delete session.metadata.dbPasswords[key];
+  await writeMetadata(session.metadataPath, session.metadata);
+  return true;
 }
 
 /** Change master: re-hash + re-AES all dbPasswords with new key. Returns new session. */

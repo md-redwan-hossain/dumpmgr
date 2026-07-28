@@ -28,6 +28,9 @@ Requires Docker. Prefer official Debian-based images (e.g. `postgres:18`, `mysql
 | `pg` / `postgres` | Same, locked to Postgres (skips engine prompt) |
 | `mysql` | Locked to MySQL |
 | `mariadb` | Locked to MariaDB |
+| `doctor` | Health check: Docker daemon, dumps dir permissions, metadata magic/version, kdfSalt/master hash presence |
+| `secret list` | List stored DB password keys (`<engine>:<item>`); values are never displayed |
+| `secret wipe <key>` | Remove a saved DB password by key (e.g. `postgres:prod`) |
 | `config init` | Scaffold `config.json` + binary `metadata` (asks about fake data) |
 | `config init --with-fake-data` | Same, but skip the fake-data prompt and use samples |
 | `config validate` | Validate `config.json` and print a summary report |
@@ -42,6 +45,9 @@ bun run dumpmgr -c .\config.json --yes
 bun run dumpmgr config init --with-fake-data
 bun run dumpmgr config validate
 bun run dumpmgr config lint
+bun run dumpmgr doctor
+bun run dumpmgr secret list
+bun run dumpmgr secret wipe postgres:prod
 ```
 
 ## Config
