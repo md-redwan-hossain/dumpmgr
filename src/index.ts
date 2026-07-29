@@ -9,6 +9,7 @@ import {
   configImage,
   configItems,
   dbKey,
+  DEFAULT_CONFIG_PATH,
   getParentItem,
   lintConfigFile,
   loadConfigAsync,
@@ -555,7 +556,7 @@ async function runMain(opts: GlobalOpts): Promise<void> {
     p.log.warn(
       `encryptedDump is true but rememberPassword is false. ` +
         `Encrypted dumps need the master-derived AES key, so set ` +
-        `"rememberPassword": true in config.json (or disable encryptedDump).`,
+        `"rememberPassword": true in config.jsonc (or disable encryptedDump).`,
     );
   }
   let session = await unlockOrNull(config, configPath);
@@ -610,7 +611,7 @@ async function handleMain(opts: GlobalOpts): Promise<void> {
 function addCommonOptions(cmd: Command): Command {
   // ponytail: commander treats a boolean 3rd arg as parseFn, so no `false` default
   return cmd
-    .option("-c, --config <path>", "Path to config.json", "config.json")
+    .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
     .option("--yes", "Skip confirms; auto-create missing dest DB")
     .option("--debug", "Print docker/DB commands being executed");
 }
@@ -656,7 +657,7 @@ program
   .description(
     "Check Docker daemon, dumps dir permissions, and metadata integrity",
   )
-  .option("-c, --config <path>", "Path to config.json", "config.json")
+  .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
   .action(async (opts: { config: string }) => {
     const configPath = resolve(opts.config);
     p.intro("dumpmgr doctor");
@@ -700,7 +701,7 @@ async function unlockForSecretOps(
   if (!needsMaster(config)) {
     p.log.warn(
       "metadata has no master password; nothing to list/wipe. " +
-        'Set "rememberPassword": true in config.json.',
+        'Set "rememberPassword": true in config.jsonc.',
     );
     return null;
   }
@@ -710,7 +711,7 @@ async function unlockForSecretOps(
 secretCmd
   .command("list")
   .description("List stored DB password keys (values are never shown)")
-  .option("-c, --config <path>", "Path to config.json", "config.json")
+  .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
   .action(async (opts: { config: string }) => {
     const configPath = resolve(opts.config);
     p.intro("dumpmgr secret list");
@@ -745,7 +746,7 @@ secretCmd
 secretCmd
   .command("wipe <key>")
   .description("Remove a saved DB password by key (e.g. postgres:prod)")
-  .option("-c, --config <path>", "Path to config.json", "config.json")
+  .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
   .option("--yes", "Skip confirmation prompt")
   .action(async (opts: { config: string; yes?: boolean }, args: { key: string }) => {
     const configPath = resolve(opts.config);
@@ -801,12 +802,12 @@ secretCmd
 
 const configCmd = program
   .command("config")
-  .description("Manage config.json");
+  .description("Manage config.jsonc");
 
 configCmd
   .command("init")
-  .description("Scaffold config.json and metadata")
-  .option("-c, --config <path>", "Path to config.json", "config.json")
+  .description("Scaffold config.jsonc and metadata")
+  .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
   .option("--with-fake-data", "Skip prompt; populate sample database items", false)
   .action(async (opts: { config: string; withFakeData: boolean }) => {
     try {
@@ -825,8 +826,8 @@ configCmd
 
 configCmd
   .command("validate")
-  .description("Validate config.json and print a summary report")
-  .option("-c, --config <path>", "Path to config.json", "config.json")
+  .description("Validate config.jsonc and print a summary report")
+  .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
   .action(async (opts: { config: string }) => {
     const configPath = resolve(opts.config);
     p.intro("dumpmgr config validate");
@@ -847,8 +848,8 @@ configCmd
 
 configCmd
   .command("lint")
-  .description("Format config.json in place")
-  .option("-c, --config <path>", "Path to config.json", "config.json")
+  .description("Format config.jsonc in place (preserves comments)")
+  .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
   .action(async (opts: { config: string }) => {
     const configPath = resolve(opts.config);
     p.intro("dumpmgr config lint");

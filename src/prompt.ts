@@ -54,7 +54,7 @@ export async function selectMode(config: Config): Promise<Mode> {
 export function requireItems(config: Config, minItems: number): void {
   if (configItemCount(config) < minItems) {
     throw new Error(
-      `Need at least ${minItems} database item(s). Edit config.json.`,
+      `Need at least ${minItems} database item(s). Edit config.jsonc.`,
     );
   }
 }

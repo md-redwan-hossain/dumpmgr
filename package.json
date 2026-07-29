@@ -12,6 +12,7 @@
   "dependencies": {
     "@clack/prompts": "^1.7.0",
     "commander": "^15.0.0",
+    "comment-json": "^5.0.0",
     "hash-wasm": "^4.12.0",
     "ora": "^9.4.1",
     "zod": "^4.4.3"

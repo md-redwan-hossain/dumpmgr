@@ -10,13 +10,13 @@ bun run dumpmgr config init
 # prompts: populate with fake sample data? then master password
 # or skip the fake-data prompt:
 bun run dumpmgr config init --with-fake-data
-# edit config.json, then:
+# edit config.jsonc, then:
 bun run dumpmgr
 ```
 
 Requires Docker. Prefer official Debian-based images (e.g. `postgres:18`). Avoid `*-alpine` Postgres images.
 
-`config init` creates `config.json` and a binary `metadata` file in the same directory. There is no example config file — use `config init`.
+`config init` creates `config.jsonc` and a binary `metadata` file in the same directory. There is no example config file — use `config init`. Comments (`//`, `/* */`) and trailing commas are allowed.
 
 ## Commands / flags
 
@@ -26,16 +26,16 @@ Requires Docker. Prefer official Debian-based images (e.g. `postgres:18`). Avoid
 | `doctor` | Health check: Docker daemon, dumps dir permissions, metadata magic/version, kdfSalt/master hash presence |
 | `secret list` | List stored DB password keys (`postgres:<item>`); values are never displayed |
 | `secret wipe <key>` | Remove a saved DB password by key (e.g. `postgres:prod`) |
-| `config init` | Scaffold `config.json` + binary `metadata` (asks about fake data) |
+| `config init` | Scaffold `config.jsonc` + binary `metadata` (asks about fake data) |
 | `config init --with-fake-data` | Same, but skip the fake-data prompt and use samples |
-| `config validate` | Validate `config.json` and print a summary report |
-| `config lint` | Format `config.json` in place (2-space indent) |
-| `-c, --config <path>` | Config path (default: `config.json`) |
+| `config validate` | Validate `config.jsonc` and print a summary report |
+| `config lint` | Format `config.jsonc` in place (2-space indent; **preserves comments**) |
+| `-c, --config <path>` | Config path (default: `config.jsonc`) |
 | `--yes` | Skip overwrite confirms; auto-create missing destination DB (flat restore only; never auto-drops) |
 
 ```powershell
 bun run dumpmgr
-bun run dumpmgr -c .\config.json --yes
+bun run dumpmgr -c .\config.jsonc --yes
 bun run dumpmgr config init --with-fake-data
 bun run dumpmgr config validate
 bun run dumpmgr config lint
@@ -46,19 +46,21 @@ bun run dumpmgr secret wipe postgres:prod
 
 ## Config
 
-```json
+JSONC: `//` line comments, `/* */` block comments, and trailing commas are allowed. `config lint` reformats and **preserves** comments.
+
+```jsonc
 {
   "rememberPassword": true,
   "encryptedDump": false,
   "dumpDirectory": ".",
-  "image": "postgres:18",
+  "image": "postgres:18", // Docker image for pg_dump / pg_restore
   "items": {
     "prod": {
       "host": "127.0.0.1",
       "port": 5432,
       "user": "db_user",
       "database": "app_db",
-      "readonly": false
+      "readonly": false,
     },
     "local_dev_docker": {
       "host": "localhost",
@@ -68,11 +70,11 @@ bun run dumpmgr secret wipe postgres:prod
       "readonly": true,
       "items": {
         "dump": {
-          "database": "retailr_db_copy"
-        }
-      }
-    }
-  }
+          "database": "retailr_db_copy",
+        },
+      },
+    },
+  },
 }
 ```
 
@@ -180,4 +182,4 @@ On Windows/macOS, `localhost` / `127.0.0.1` is rewritten to `host.docker.interna
 
 ## Missing config
 
-If `config.json` is missing, dumpmgr shows an error and offers to run **config init** with or without fake data, then exits so you can edit the config before dumping/restoring.
+If `config.jsonc` is missing, dumpmgr shows an error and offers to run **config init** with or without fake data, then exits so you can edit the config before dumping/restoring.

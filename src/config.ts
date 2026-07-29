@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { parse, stringify } from "comment-json";
 
 export const DEFAULT_IMAGE = "postgres:18";
 
@@ -196,24 +197,27 @@ export function defaultConfigScaffold(withFakeData: boolean): Config {
   };
 }
 
+export const DEFAULT_CONFIG_PATH = "config.jsonc";
+
 export async function configExists(path: string): Promise<boolean> {
   return Bun.file(path).exists();
 }
 
-export async function readJsonFile(path: string): Promise<unknown> {
+export async function readConfigFile(path: string): Promise<unknown> {
   const file = Bun.file(path);
   if (!(await file.exists())) {
     throw new Error(`Config file not found: ${path}`);
   }
   try {
-    return await file.json();
-  } catch {
-    throw new Error(`Invalid JSON in config file: ${path}`);
+    return parse(await file.text());
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`Invalid JSONC in config file: ${path}\n${detail}`);
   }
 }
 
 export async function loadConfigAsync(path: string): Promise<Config> {
-  const raw = await readJsonFile(path);
+  const raw = await readConfigFile(path);
   const result = ConfigSchema.safeParse(raw);
   if (!result.success) {
     const details = result.error.issues
@@ -229,13 +233,13 @@ export async function writeConfigAsync(
   path: string,
   config: Config,
 ): Promise<void> {
-  await Bun.write(path, `${JSON.stringify(config, null, 2)}\n`);
+  await Bun.write(path, `${stringify(config, null, 2)}\n`);
 }
 
-/** Format any valid JSON in place (2-space indent + trailing newline). */
+/** Format config in place (2-space indent). Comments are preserved. */
 export async function lintConfigFile(path: string): Promise<void> {
-  const raw = await readJsonFile(path);
-  await Bun.write(path, `${JSON.stringify(raw, null, 2)}\n`);
+  const raw = await readConfigFile(path);
+  await Bun.write(path, `${stringify(raw, null, 2)}\n`);
 }
 
 export type ConfigValidateResult =
@@ -247,7 +251,7 @@ export async function validateConfigFile(
 ): Promise<ConfigValidateResult> {
   let raw: unknown;
   try {
-    raw = await readJsonFile(path);
+    raw = await readConfigFile(path);
   } catch (err) {
     return {
       ok: false,
