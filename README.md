@@ -1,6 +1,6 @@
 # dumpmgr
 
-**Dump Manager** — dump and restore **Postgres**, **MySQL**, and **MariaDB** databases through Docker, with interactive prompts, optional encrypted dumps, and AES-wrapped remembered DB passwords.
+**Dump Manager** — dump and restore **Postgres** databases through Docker, with interactive prompts, optional encrypted dumps, and AES-wrapped remembered DB passwords.
 
 ## Setup
 
@@ -12,11 +12,9 @@ bun run dumpmgr config init
 bun run dumpmgr config init --with-fake-data
 # edit config.json, then:
 bun run dumpmgr
-# or lock the engine:
-bun run dumpmgr pg
 ```
 
-Requires Docker. Prefer official Debian-based images (e.g. `postgres:18`, `mysql:8`, `mariadb:11`). Avoid `*-alpine` Postgres images.
+Requires Docker. Prefer official Debian-based images (e.g. `postgres:18`). Avoid `*-alpine` Postgres images.
 
 `config init` creates `config.json` and a binary `metadata` file in the same directory. There is no example config file — use `config init`.
 
@@ -24,12 +22,9 @@ Requires Docker. Prefer official Debian-based images (e.g. `postgres:18`, `mysql
 
 | Command / flag | Description |
 |----------------|-------------|
-| `(default)` | Interactive dump / restore / sync / change master (prompts for engine) |
-| `pg` / `postgres` | Same, locked to Postgres (skips engine prompt) |
-| `mysql` | Locked to MySQL |
-| `mariadb` | Locked to MariaDB |
+| `(default)` | Interactive dump / restore / sync / change master |
 | `doctor` | Health check: Docker daemon, dumps dir permissions, metadata magic/version, kdfSalt/master hash presence |
-| `secret list` | List stored DB password keys (`<engine>:<item>`); values are never displayed |
+| `secret list` | List stored DB password keys (`postgres:<item>`); values are never displayed |
 | `secret wipe <key>` | Remove a saved DB password by key (e.g. `postgres:prod`) |
 | `config init` | Scaffold `config.json` + binary `metadata` (asks about fake data) |
 | `config init --with-fake-data` | Same, but skip the fake-data prompt and use samples |
@@ -40,7 +35,6 @@ Requires Docker. Prefer official Debian-based images (e.g. `postgres:18`, `mysql
 
 ```powershell
 bun run dumpmgr
-bun run dumpmgr pg
 bun run dumpmgr -c .\config.json --yes
 bun run dumpmgr config init --with-fake-data
 bun run dumpmgr config validate
@@ -57,37 +51,27 @@ bun run dumpmgr secret wipe postgres:prod
   "rememberPassword": true,
   "encryptedDump": false,
   "dumpDirectory": ".",
-  "postgres": {
-    "image": "postgres:18",
-    "items": {
-      "prod": {
-        "host": "127.0.0.1",
-        "port": 5432,
-        "user": "db_user",
-        "database": "app_db",
-        "readonly": false
-      },
-      "local_dev_docker": {
-        "host": "localhost",
-        "port": 5437,
-        "user": "retailr_user",
-        "database": "retailr_db",
-        "readonly": true,
-        "items": {
-          "dump": {
-            "database": "retailr_db_copy"
-          }
+  "image": "postgres:18",
+  "items": {
+    "prod": {
+      "host": "127.0.0.1",
+      "port": 5432,
+      "user": "db_user",
+      "database": "app_db",
+      "readonly": false
+    },
+    "local_dev_docker": {
+      "host": "localhost",
+      "port": 5437,
+      "user": "retailr_user",
+      "database": "retailr_db",
+      "readonly": true,
+      "items": {
+        "dump": {
+          "database": "retailr_db_copy"
         }
       }
     }
-  },
-  "mysql": {
-    "image": "mysql:8",
-    "items": {}
-  },
-  "mariadb": {
-    "image": "mariadb:11",
-    "items": {}
   }
 }
 ```
@@ -97,8 +81,8 @@ bun run dumpmgr secret wipe postgres:prod
 | `rememberPassword` | Store DB passwords in binary `metadata` (AES-256-GCM), unlocked by master password |
 | `encryptedDump` | Encrypt dump files with the master-derived AES key |
 | `dumpDirectory` | Base directory for dumps (default `.` → `./dumps`) |
-| `*/image` | Docker image for that engine (optional; defaults shown above) |
-| `*/items` | Named map of targets. Fields: `host`, `port`, `user`, `database`, `readonly` (default `false`). **No password field.** |
+| `image` | Docker image (optional; default `postgres:18`) |
+| `items` | Named map of targets. Fields: `host`, `port`, `user`, `database`, `readonly` (default `false`). **No password field.** |
 
 ### Nested items (one level)
 
@@ -106,7 +90,7 @@ A parent may include nested `items`. Children set `database` (and optionally `us
 
 - Runtime key: `parent:child` (e.g. `local_dev_docker:dump`)
 - Password metadata key: `postgres:local_dev_docker:dump`
-- Dump folder: `dumps/postgres/local_dev_docker/dump/`
+- Dump folder: `dumps/local_dev_docker/dump/`
 
 `config init` always emits `"readonly": false` on scaffolded top-level entries.
 
@@ -145,7 +129,7 @@ On first load, legacy `metadata.json` is migrated once to binary `metadata` and 
 
 ## Interactive modes
 
-1. **Take dump** — write a dump under `dumps/{engine}/…`
+1. **Take dump** — write a dump under `dumps/…`
 2. **Restore from dump** — browse dump files → destination
 3. **Take dump and restore** — source → destination
 4. **Change master password** (if master is enabled) — re-AES all `dbPasswords`; if encrypted dumps matching this vault’s `encId` exist, choose:
@@ -155,7 +139,7 @@ On first load, legacy `metadata.json` is migrated once to binary `metadata` and 
 
 ### Restore UX
 
-- **Dump picker:** interactive folder browser under `dumps/{engine}/` (`..`, folders, files).
+- **Dump picker:** interactive folder browser under `dumps/` (`..`, folders, files).
 - **Destination:** tree-style list (`└` for nested children).
 - **Nested destination:** verify parent connection, then try child:
   - Child reachable → **Yes** / **Drop database and restore** / **No**
@@ -168,37 +152,31 @@ Dump progress uses an **ora** spinner with a live timer; on success it shows ela
 
 ```text
 dumps/
-  postgres/
-    prod/
-      postgres_prod_2026-07-25_10-02-15.dump
-      postgres_prod_2026-07-25_10-02-15_enc_A1B2….dump   # if encryptedDump
-    local_dev_docker/
-      dump/
-        postgres_local_dev_docker__dump_2026-07-25_11-00-00.dump
-  mysql/
-    local/
-      mysql_local_2026-07-25_11-00-00.sql
+  prod/
+    prod_2026-07-25_10-02-15.dump
+    prod_2026-07-25_10-02-15_enc_A1B2….dump   # if encryptedDump
+  local_dev_docker/
+    dump/
+      local_dev_docker__dump_2026-07-25_11-00-00.dump
 ```
 
-Filenames: `{engine}_{key}_{utcTimestamp}[_enc_<encId>].{dump|sql}`.
+Filenames: `{key}_{utcTimestamp}[_enc_<encId>].dump`.
 
 - Timestamp is **UTC** (`yyyy-MM-dd_HH-mm-ss`).
 - Nested keys use `:` in config/runtime; `__` in the filename mid-key.
-- Postgres uses `.dump` (custom + zstd); MySQL/MariaDB use `.sql`.
+- Format is Postgres custom + zstd (`.dump`).
 
-## Engines
+## Postgres tooling
 
-Same workflow for all three. Tooling differs inside Docker:
+Inside Docker:
 
-| | Postgres | MySQL / MariaDB |
-|--|----------|-----------------|
-| Dump | `pg_dump --format=custom --compress=zstd:5` | `mysqldump` / `mariadb-dump` |
-| Restore | `pg_restore --jobs N` | `mysql` / `mariadb` client |
-| Maintenance DB | `postgres` | `mysql` |
+| | |
+|--|--|
+| Dump | `pg_dump --format=custom --compress=zstd:5` |
+| Restore | `pg_restore --jobs N` |
+| Maintenance DB | `postgres` |
 
 On Windows/macOS, `localhost` / `127.0.0.1` is rewritten to `host.docker.internal` inside containers.
-
-Cross-engine sync (e.g. Postgres → MySQL) is not supported.
 
 ## Missing config
 

@@ -1,13 +1,6 @@
 import { z } from "zod";
 
-export const ENGINES = ["postgres", "mysql", "mariadb"] as const;
-export type Engine = (typeof ENGINES)[number];
-
-export const DEFAULT_IMAGES: Record<Engine, string> = {
-  postgres: "postgres:18",
-  mysql: "mysql:8",
-  mariadb: "mariadb:11",
-};
+export const DEFAULT_IMAGE = "postgres:18";
 
 export const ChildDatabaseSchema = z
   .object({
@@ -45,25 +38,13 @@ export type DatabaseItem = {
   parentKey?: string;
 };
 
-export const EngineSectionSchema = z.object({
+export const ConfigSchema = z.object({
+  rememberPassword: z.boolean().default(true),
+  encryptedDump: z.boolean().default(false),
+  dumpDirectory: z.string().default("."),
   image: z.string().min(1).optional(),
   items: z.record(z.string(), DatabaseEntrySchema).default({}),
 });
-
-export type EngineSection = z.infer<typeof EngineSectionSchema>;
-
-export const ConfigSchema = z
-  .object({
-    rememberPassword: z.boolean().default(true),
-    encryptedDump: z.boolean().default(false),
-    dumpDirectory: z.string().default("."),
-    postgres: EngineSectionSchema.optional(),
-    mysql: EngineSectionSchema.optional(),
-    mariadb: EngineSectionSchema.optional(),
-  })
-  .refine((c) => c.postgres || c.mysql || c.mariadb, {
-    message: "Need at least one of postgres, mysql, mariadb",
-  });
 
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -71,12 +52,12 @@ export function needsMaster(config: Config): boolean {
   return config.rememberPassword || config.encryptedDump;
 }
 
-export function engineImage(config: Config, engine: Engine): string {
-  return config[engine]?.image ?? DEFAULT_IMAGES[engine];
+export function configImage(config: Config): string {
+  return config.image ?? DEFAULT_IMAGE;
 }
 
-export function engineItems(config: Config, engine: Engine): DatabaseItem[] {
-  const entries = config[engine]?.items ?? {};
+export function configItems(config: Config): DatabaseItem[] {
+  const entries = config.items ?? {};
   const out: DatabaseItem[] = [];
   for (const [key, entry] of Object.entries(entries)) {
     out.push({
@@ -112,11 +93,8 @@ export type TreeDatabaseOption = DatabaseItem & {
 };
 
 /** Destination picker: readonly parents stay visible but disabled. */
-export function engineRestoreTreeItems(
-  config: Config,
-  engine: Engine,
-): TreeDatabaseOption[] {
-  const entries = config[engine]?.items ?? {};
+export function configRestoreTreeItems(config: Config): TreeDatabaseOption[] {
+  const entries = config.items ?? {};
   const out: TreeDatabaseOption[] = [];
   for (const [key, entry] of Object.entries(entries)) {
     const children = entry.items ? Object.entries(entry.items) : [];
@@ -151,16 +129,15 @@ export function engineRestoreTreeItems(
   return out;
 }
 
-export function engineItemCount(config: Config, engine: Engine): number {
-  return engineItems(config, engine).length;
+export function configItemCount(config: Config): number {
+  return configItems(config).length;
 }
 
 export function getParentItem(
   config: Config,
-  engine: Engine,
   parentKey: string,
 ): DatabaseItem | null {
-  const entry = config[engine]?.items?.[parentKey];
+  const entry = config.items?.[parentKey];
   if (!entry) return null;
   return {
     key: parentKey,
@@ -172,8 +149,8 @@ export function getParentItem(
   };
 }
 
-export function dbKey(engine: Engine, itemKey: string): string {
-  return `${engine}:${itemKey}`;
+export function dbKey(itemKey: string): string {
+  return `postgres:${itemKey}`;
 }
 
 function entry(
@@ -183,64 +160,38 @@ function entry(
 }
 
 export function defaultConfigScaffold(withFakeData: boolean): Config {
-  const empty = { items: {} as Record<string, DatabaseEntry> };
   if (!withFakeData) {
     return {
       rememberPassword: true,
       encryptedDump: false,
       dumpDirectory: ".",
-      postgres: { image: DEFAULT_IMAGES.postgres, ...empty },
-      mysql: { image: DEFAULT_IMAGES.mysql, ...empty },
-      mariadb: { image: DEFAULT_IMAGES.mariadb, ...empty },
+      image: DEFAULT_IMAGE,
+      items: {},
     };
   }
   return {
     rememberPassword: true,
     encryptedDump: false,
     dumpDirectory: ".",
-    postgres: {
-      image: DEFAULT_IMAGES.postgres,
-      items: {
-        prod: entry({
-          host: "127.0.0.1",
-          port: 5432,
-          user: "db_user",
-          database: "app_db",
-        }),
-        local_dev: entry({
-          host: "localhost",
-          port: 5433,
-          user: "db_user",
-          database: "app_db",
-          items: {
-            dump: {
-              database: "app_db_dump",
-            },
+    image: DEFAULT_IMAGE,
+    items: {
+      prod: entry({
+        host: "127.0.0.1",
+        port: 5432,
+        user: "db_user",
+        database: "app_db",
+      }),
+      local_dev: entry({
+        host: "localhost",
+        port: 5433,
+        user: "db_user",
+        database: "app_db",
+        items: {
+          dump: {
+            database: "app_db_dump",
           },
-        }),
-      },
-    },
-    mysql: {
-      image: DEFAULT_IMAGES.mysql,
-      items: {
-        local: entry({
-          host: "localhost",
-          port: 3306,
-          user: "root",
-          database: "app",
-        }),
-      },
-    },
-    mariadb: {
-      image: DEFAULT_IMAGES.mariadb,
-      items: {
-        local: entry({
-          host: "localhost",
-          port: 3307,
-          user: "root",
-          database: "app",
-        }),
-      },
+        },
+      }),
     },
   };
 }
@@ -315,56 +266,47 @@ export async function validateConfigFile(
   }
 
   const config = result.data;
+  const image = configImage(config);
+  const entries = Object.entries(config.items);
+  const nestedCount = entries.reduce(
+    (n, [, e]) => n + Object.keys(e.items ?? {}).length,
+    0,
+  );
+  const totalItems = entries.length + nestedCount;
+
   const report: string[] = [
     `rememberPassword: ${config.rememberPassword}`,
     `encryptedDump: ${config.encryptedDump}`,
     `dumpDirectory: ${config.dumpDirectory}`,
+    "",
+    `image=${image}  parents=${entries.length}  nested=${nestedCount}`,
   ];
   const warnings: string[] = [];
-  let totalItems = 0;
 
-  for (const engine of ENGINES) {
-    const section = config[engine];
-    if (!section) continue;
+  if (entries.length === 0) {
+    warnings.push("no database items configured");
+  }
+  if (image.toLowerCase().includes("alpine")) {
+    warnings.push(`image contains "alpine" (${image})`);
+  }
 
-    const image = section.image ?? DEFAULT_IMAGES[engine];
-    const entries = Object.entries(section.items);
-    const nestedCount = entries.reduce(
-      (n, [, e]) => n + Object.keys(e.items ?? {}).length,
-      0,
-    );
-    totalItems += entries.length + nestedCount;
-
-    report.push("");
+  for (const [key, e] of entries) {
+    const ro = e.readonly ? "  readonly" : "";
     report.push(
-      `${engine}  image=${image}  parents=${entries.length}  nested=${nestedCount}`,
+      `  ${key} → ${e.host}:${e.port}  ${e.user} / ${e.database}${ro}`,
     );
-
-    if (entries.length === 0) {
-      warnings.push(`${engine}: no database items`);
-    }
-    if (image.toLowerCase().includes("alpine")) {
-      warnings.push(`${engine}: image contains "alpine" (${image})`);
-    }
-
-    for (const [key, entry] of entries) {
-      const ro = entry.readonly ? "  readonly" : "";
-      report.push(
-        `  ${key} → ${entry.host}:${entry.port}  ${entry.user} / ${entry.database}${ro}`,
-      );
-      if (entry.items) {
-        for (const [childKey, child] of Object.entries(entry.items)) {
-          const user = child.user ?? entry.user;
-          report.push(
-            `    ${key}:${childKey} → ${entry.host}:${entry.port}  ${user} / ${child.database}`,
-          );
-        }
+    if (e.items) {
+      for (const [childKey, child] of Object.entries(e.items)) {
+        const user = child.user ?? e.user;
+        report.push(
+          `    ${key}:${childKey} → ${e.host}:${e.port}  ${user} / ${child.database}`,
+        );
       }
     }
   }
 
   if (totalItems === 0) {
-    warnings.push("no database items configured in any engine");
+    warnings.push("no database items configured");
   }
 
   return { ok: true, config, report, warnings };

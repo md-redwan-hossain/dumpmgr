@@ -1,6 +1,5 @@
 import { access, constants, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import type { Engine } from "./config.ts";
 import { decryptBytes, encryptBytes } from "./crypto.ts";
 
 export function resolveDumpsRoot(dumpDirectory: string): string {
@@ -25,8 +24,8 @@ export async function ensureDumpsRootWritable(dumpsRoot: string): Promise<void> 
   }
 }
 
-export function dumpExtension(engine: Engine): string {
-  return engine === "postgres" ? ".dump" : ".sql";
+export function dumpExtension(): string {
+  return ".dump";
 }
 
 /** UTC timestamp: yyyy-MM-dd_HH-mm-ss */
@@ -35,32 +34,25 @@ export function dumpTimestamp(d = new Date()): string {
   return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}_${p(d.getUTCHours())}-${p(d.getUTCMinutes())}-${p(d.getUTCSeconds())}`;
 }
 
-export function dbDumpDir(
-  dumpsRoot: string,
-  engine: Engine,
-  itemKey: string,
-): string {
-  return join(dumpsRoot, engine, ...itemKey.split(":"));
+export function dbDumpDir(dumpsRoot: string, itemKey: string): string {
+  return join(dumpsRoot, ...itemKey.split(":"));
 }
 
 export function dumpFileKey(itemKey: string): string {
   return itemKey.replaceAll(":", "__");
 }
 
-const ENC_ID_RE = /_enc_([A-F0-9]+)(\.(dump|sql))$/i;
+const ENC_ID_RE = /_enc_([A-F0-9]+)(\.dump)$/i;
 
-export function newDumpFileName(
-  engine: Engine,
-  itemKey: string,
-): string {
-  return `${engine}_${dumpFileKey(itemKey)}_${dumpTimestamp()}${dumpExtension(engine)}`;
+export function newDumpFileName(itemKey: string): string {
+  return `${dumpFileKey(itemKey)}_${dumpTimestamp()}${dumpExtension()}`;
 }
 
 export function isEncryptedDumpName(fileName: string): boolean {
   return (
     fileName.endsWith(".enc") ||
     ENC_ID_RE.test(fileName) ||
-    /_encrypted\.(dump|sql)$/i.test(fileName)
+    /_encrypted\.dump$/i.test(fileName)
   );
 }
 
@@ -74,12 +66,12 @@ export function plainTempNameFromEncrypted(fileName: string): string {
   if (fileName.endsWith(".enc")) return fileName.replace(/\.enc$/, "");
   return fileName
     .replace(ENC_ID_RE, "$2")
-    .replace(/_encrypted(\.(dump|sql))$/i, "$1");
+    .replace(/_encrypted(\.dump)$/i, "$1");
 }
 
 export function encryptedPathFromPlain(path: string, encId: string): string {
   if (isEncryptedDumpName(basename(path))) return path;
-  return path.replace(/(\.(dump|sql))$/i, `_enc_${encId}$1`);
+  return path.replace(/(\.dump)$/i, `_enc_${encId}$1`);
 }
 
 export async function listDumpFiles(
@@ -92,9 +84,7 @@ export async function listDumpFiles(
       .filter((f) => {
         const isDump =
           f.endsWith(".dump") ||
-          f.endsWith(".sql") ||
-          f.endsWith(".dump.enc") ||
-          f.endsWith(".sql.enc");
+          f.endsWith(".dump.enc");
         if (!isDump) return false;
         return encryptedOnly
           ? isEncryptedDumpName(f)
@@ -133,9 +123,7 @@ export async function listDumpBrowserEntries(
     }
     const isDump =
       name.endsWith(".dump") ||
-      name.endsWith(".sql") ||
-      name.endsWith(".dump.enc") ||
-      name.endsWith(".sql.enc");
+      name.endsWith(".dump.enc");
     if (!isDump) continue;
     const ok = encryptedOnly
       ? isEncryptedDumpName(name)

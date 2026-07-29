@@ -6,17 +6,15 @@ import * as p from "@clack/prompts";
 import ora from "ora";
 import {
   configExists,
+  configImage,
+  configItems,
   dbKey,
-  engineImage,
-  engineItemCount,
-  engineItems,
   getParentItem,
   lintConfigFile,
   loadConfigAsync,
   needsMaster,
   type Config,
   type DatabaseItem,
-  type Engine,
   validateConfigFile,
 } from "./config.ts";
 import { runDoctor } from "./doctor.ts";
@@ -28,7 +26,6 @@ import {
   DUMP_COMPRESS,
   dumpDatabase,
   ensureDatabaseLogin,
-  maintenanceDb,
   restoreDatabase,
   restoreJobs,
   setDockerDebug,
@@ -67,10 +64,10 @@ import {
   onCancel,
   promptConfirmedPassword,
   promptPassword,
+  requireItems,
   resolveDbPassword,
   selectDatabaseItem,
   selectDatabaseTree,
-  selectEngine,
   selectMode,
   selectNestedCreatePassword,
   selectNestedRestoreAction,
@@ -83,7 +80,6 @@ type GlobalOpts = {
   config: string;
   yes?: boolean;
   debug?: boolean;
-  engine?: Engine;
   mode?: CliMode;
 };
 
@@ -106,13 +102,12 @@ async function unlockOrNull(config: Config, configPath: string): Promise<Session
 async function resolveConnectedDb(opts: {
   config: Config;
   session: Session | null;
-  engine: Engine;
   item: DatabaseItem;
   role: "source" | "destination";
   maintenance?: boolean;
 }): Promise<ResolvedDb> {
-  const image = engineImage(opts.config, opts.engine);
-  const key = dbKey(opts.engine, opts.item.key);
+  const image = configImage(opts.config);
+  const key = dbKey(opts.item.key);
 
   const password = await connectWithRetry({
     label: opts.item.key,
@@ -120,7 +115,6 @@ async function resolveConnectedDb(opts: {
       resolveDbPassword({
         session: opts.session,
         rememberPassword: opts.config.rememberPassword,
-        engine: opts.engine,
         item: opts.item,
       }),
     setPassword: async (pw) => {
@@ -131,14 +125,11 @@ async function resolveConnectedDb(opts: {
     connect: async (pw) => {
       const db: ResolvedDb = { ...opts.item, password: pw };
       await verifyConnection(
-        opts.engine,
         image,
         opts.role,
         opts.item.key,
         db,
-        opts.maintenance
-          ? { database: maintenanceDb(opts.engine) }
-          : undefined,
+        opts.maintenance ? { database: "postgres" } : undefined,
       );
     },
   });
@@ -147,7 +138,6 @@ async function resolveConnectedDb(opts: {
 }
 
 async function runDumpWithSpinner(
-  engine: Engine,
   image: string,
   db: ResolvedDb,
   workdir: string,
@@ -161,7 +151,7 @@ async function runDumpWithSpinner(
     spinner.text = `Dumping ${label}… ${formatDuration(performance.now() - t0)}`;
   }, 100);
   try {
-    await dumpDatabase(engine, image, db, workdir, dumpFileName);
+    await dumpDatabase(image, db, workdir, dumpFileName);
   } finally {
     clearInterval(tick);
   }
@@ -174,7 +164,6 @@ async function runDumpWithSpinner(
 }
 
 async function runRestoreWithSpinner(
-  engine: Engine,
   image: string,
   db: ResolvedDb,
   workdir: string,
@@ -182,8 +171,7 @@ async function runRestoreWithSpinner(
   label: string,
   opts?: { clean?: boolean },
 ): Promise<number> {
-  const jobsHint =
-    engine === "postgres" ? ` (--jobs ${restoreJobs()})` : "";
+  const jobsHint = ` (--jobs ${restoreJobs()})`;
   const spinner = ora({
     text: `Restoring ${label}${jobsHint}… 0.0s`,
   }).start();
@@ -193,14 +181,7 @@ async function runRestoreWithSpinner(
   }, 100);
   let warnings: string | undefined;
   try {
-    const result = await restoreDatabase(
-      engine,
-      image,
-      db,
-      workdir,
-      dumpFileName,
-      opts,
-    );
+    const result = await restoreDatabase(image, db, workdir, dumpFileName, opts);
     warnings = result.warnings;
   } finally {
     clearInterval(tick);
@@ -214,24 +195,21 @@ async function runRestoreWithSpinner(
 }
 
 async function resolveRestoreClean(opts: {
-  engine: Engine;
   intoExisting: boolean;
   yes?: boolean;
 }): Promise<boolean> {
-  if (opts.engine !== "postgres") return false;
   if (!opts.intoExisting) return false;
   return selectReplaceExistingObjects(opts.yes);
 }
 
 async function ensureDestDatabase(
   config: Config,
-  engine: Engine,
   dest: ResolvedDb,
   destName: string,
   yes?: boolean,
 ): Promise<{ created: boolean }> {
-  const image = engineImage(config, engine);
-  const exists = await databaseExists(engine, image, dest);
+  const image = configImage(config);
+  const exists = await databaseExists(image, dest);
   if (exists) return { created: false };
   const create = await confirmOrYes(
     `Database "${dest.database}" does not exist on destination (${destName}). Create it?`,
@@ -242,7 +220,7 @@ async function ensureDestDatabase(
     throw new Error("Destination database does not exist. Aborted.");
   }
   p.log.step(`Creating database "${dest.database}"…`);
-  await createDatabase(engine, image, dest);
+  await createDatabase(image, dest);
   p.log.success(`Created "${dest.database}"`);
   return { created: true };
 }
@@ -279,32 +257,13 @@ async function handleChangeMaster(
       p.log.success(`Deleted ${n} encrypted dump(s)`);
     } else {
       await ensureDumpsRootWritable(dumpsRoot);
-      const n = await reencryptAllDumps(
-        dumpsRoot,
-        oldKey,
-        updated.aesKey!,
-        encId,
-      );
+      const n = await reencryptAllDumps(dumpsRoot, oldKey, updated.aesKey!, encId);
       p.log.success(`Re-encrypted ${n} dump file(s)`);
     }
   }
 
   p.log.success("Master password changed");
   return updated;
-}
-
-async function resolveEngine(
-  config: Config,
-  fixed: Engine | undefined,
-  minItems: number,
-): Promise<Engine> {
-  if (!fixed) return selectEngine(config, minItems);
-  if (engineItemCount(config, fixed) < minItems) {
-    throw new Error(
-      `${fixed} needs at least ${minItems} database item(s). Edit config.json.`,
-    );
-  }
-  return fixed;
 }
 
 async function runMode(
@@ -314,9 +273,9 @@ async function runMode(
   session: Session | null,
 ): Promise<void> {
   const minItems = mode === "dump-restore" ? 2 : 1;
-  const engine = await resolveEngine(config, opts.engine, minItems);
-  const items = engineItems(config, engine);
-  const image = engineImage(config, engine);
+  requireItems(config, minItems);
+  const items = configItems(config);
+  const image = configImage(config);
   const dumpsRoot = resolveDumpsRoot(config.dumpDirectory);
   await ensureDumpsRootWritable(dumpsRoot);
 
@@ -325,22 +284,14 @@ async function runMode(
     const sourceDb = await resolveConnectedDb({
       config,
       session,
-      engine,
       item: sourceItem,
       role: "source",
     });
 
-    const dir = dbDumpDir(dumpsRoot, engine, sourceItem.key);
+    const dir = dbDumpDir(dumpsRoot, sourceItem.key);
     await mkdir(dir, { recursive: true });
-    const plainName = newDumpFileName(engine, sourceItem.key);
-    await runDumpWithSpinner(
-      engine,
-      image,
-      sourceDb,
-      dir,
-      plainName,
-      sourceItem.key,
-    );
+    const plainName = newDumpFileName(sourceItem.key);
+    await runDumpWithSpinner(image, sourceDb, dir, plainName, sourceItem.key);
 
     let finalPath = join(dir, plainName);
     if (config.encryptedDump) {
@@ -357,22 +308,17 @@ async function runMode(
   }
 
   if (mode === "restore") {
-    const engineDumps = join(dumpsRoot, engine);
-    const dumpPath = await browseDumpFile(engineDumps, config.encryptedDump);
+    const dumpPath = await browseDumpFile(dumpsRoot, config.encryptedDump);
     const fileName = basename(dumpPath);
     const dir = dirname(dumpPath);
 
-    const destItem = await selectDatabaseTree(
-      config,
-      engine,
-      "Select destination database",
-    );
+    const destItem = await selectDatabaseTree(config, "Select destination database");
 
     let destDb: ResolvedDb;
     let intoExisting = false;
 
     if (destItem.nested && destItem.parentKey) {
-      const parentItem = getParentItem(config, engine, destItem.parentKey);
+      const parentItem = getParentItem(config, destItem.parentKey);
       if (!parentItem) {
         throw new Error(
           `Nested destination "${destItem.key}" needs parent "${destItem.parentKey}" with user+database for connection verify.`,
@@ -383,25 +329,16 @@ async function runMode(
       const parentDb = await resolveConnectedDb({
         config,
         session,
-        engine,
         item: parentItem,
         role: "destination",
       });
       p.log.success(`Parent "${parentItem.key}" OK`);
 
       const parentLogin = parentDb.database;
-      const childTarget = {
-        ...parentDb,
-        database: destItem.database,
-      };
+      const childTarget = { ...parentDb, database: destItem.database };
       const connectOpts = { connectDatabase: parentLogin };
 
-      const childExists = await databaseExists(
-        engine,
-        image,
-        childTarget,
-        connectOpts,
-      );
+      const childExists = await databaseExists(image, childTarget, connectOpts);
 
       const action = await selectNestedRestoreAction(
         `Restore "${fileName}" into "${destItem.key}"?`,
@@ -414,25 +351,21 @@ async function runMode(
 
       if (action === "drop") {
         p.log.step(`Dropping database "${destItem.database}"…`);
-        await dropDatabase(engine, image, childTarget, connectOpts);
+        await dropDatabase(image, childTarget, connectOpts);
         p.log.step(`Creating database "${destItem.database}"…`);
-        await createDatabase(engine, image, childTarget, connectOpts);
+        await createDatabase(image, childTarget, connectOpts);
         p.log.success(`Recreated "${destItem.database}"`);
       } else if (action === "create") {
         p.log.step(`Creating database "${destItem.database}"…`);
-        await createDatabase(engine, image, childTarget, connectOpts);
+        await createDatabase(image, childTarget, connectOpts);
         p.log.success(`Created "${destItem.database}"`);
       }
 
       if (action === "create" || action === "drop") {
         if (parentDb.user === destItem.user) {
-          destDb = {
-            ...destItem,
-            user: parentDb.user,
-            password: parentDb.password,
-          };
+          destDb = { ...destItem, user: parentDb.user, password: parentDb.password };
         } else {
-          const childKey = dbKey(engine, destItem.key);
+          const childKey = dbKey(destItem.key);
           const saved =
             session && config.rememberPassword
               ? await getDbPassword(session, childKey)
@@ -442,22 +375,16 @@ async function runMode(
             : await selectNestedCreatePassword({ hasSaved: Boolean(saved) });
 
           if (pwSource === "parent") {
-            destDb = {
-              ...destItem,
-              user: parentDb.user,
-              password: parentDb.password,
-            };
+            destDb = { ...destItem, user: parentDb.user, password: parentDb.password };
           } else if (pwSource === "saved") {
-            if (!saved) {
-              throw new Error(`No saved password for "${destItem.key}"`);
-            }
+            if (!saved) throw new Error(`No saved password for "${destItem.key}"`);
             destDb = { ...destItem, password: saved };
           } else {
             const password = await promptConfirmedPassword(
               `password for ${destItem.key} (${destItem.user})`,
             );
             p.log.step(`Ensuring login "${destItem.user}"…`);
-            await ensureDatabaseLogin(engine, image, parentDb, {
+            await ensureDatabaseLogin(image, parentDb, {
               user: destItem.user,
               password,
               database: destItem.database,
@@ -473,28 +400,17 @@ async function runMode(
       } else {
         // action === "yes": restore into existing with parent creds
         intoExisting = true;
-        destDb = {
-          ...destItem,
-          user: parentDb.user,
-          password: parentDb.password,
-        };
+        destDb = { ...destItem, user: parentDb.user, password: parentDb.password };
       }
     } else {
       destDb = await resolveConnectedDb({
         config,
         session,
-        engine,
         item: destItem,
         role: "destination",
         maintenance: true,
       });
-      const { created } = await ensureDestDatabase(
-        config,
-        engine,
-        destDb,
-        destItem.key,
-        opts.yes,
-      );
+      const { created } = await ensureDestDatabase(config, destDb, destItem.key, opts.yes);
       intoExisting = !created;
 
       const confirmed = await confirmOrYes(
@@ -508,11 +424,7 @@ async function runMode(
       }
     }
 
-    const clean = await resolveRestoreClean({
-      engine,
-      intoExisting,
-      yes: opts.yes,
-    });
+    const clean = await resolveRestoreClean({ intoExisting, yes: opts.yes });
 
     let restoreDir = dir;
     let restoreName = fileName;
@@ -531,15 +443,7 @@ async function runMode(
     }
 
     try {
-      await runRestoreWithSpinner(
-        engine,
-        image,
-        destDb,
-        restoreDir,
-        restoreName,
-        destItem.key,
-        { clean },
-      );
+      await runRestoreWithSpinner(image, destDb, restoreDir, restoreName, destItem.key, { clean });
     } finally {
       if (tempPlain) await rm(tempPlain, { force: true });
     }
@@ -550,31 +454,18 @@ async function runMode(
 
   // dump-restore
   const sourceItem = await selectDatabaseItem(items, "Select source database");
-  const destItem = await selectDatabaseTree(
-    config,
-    engine,
-    "Select destination database",
-    sourceItem.key,
-  );
+  const destItem = await selectDatabaseTree(config, "Select destination database", sourceItem.key);
 
-  const sourceDb = await resolveConnectedDb({
-    config,
-    session,
-    engine,
-    item: sourceItem,
-    role: "source",
-  });
+  const sourceDb = await resolveConnectedDb({ config, session, item: sourceItem, role: "source" });
   const destDb = await resolveConnectedDb({
     config,
     session,
-    engine,
     item: destItem,
     role: "destination",
     maintenance: true,
   });
   const { created: destCreated } = await ensureDestDatabase(
     config,
-    engine,
     destDb,
     destItem.key,
     opts.yes,
@@ -582,16 +473,13 @@ async function runMode(
 
   p.note(
     [
-      `Engine:      ${engine}`,
       `Source:      ${sourceItem.key} → ${sourceDb.user}@${sourceDb.host}:${sourceDb.port}/${sourceDb.database}`,
       `Destination: ${destItem.key} → ${destDb.user}@${destDb.host}:${destDb.port}/${destDb.database}`,
       `Image:       ${image}`,
-      engine === "postgres" ? `Compress:    ${DUMP_COMPRESS}` : undefined,
+      `Compress:    ${DUMP_COMPRESS}`,
       `Dumps:       ${dumpsRoot}`,
       `Encrypted:   ${config.encryptedDump}`,
-    ]
-      .filter(Boolean)
-      .join("\n"),
+    ].join("\n"),
     "Sync plan",
   );
 
@@ -605,33 +493,13 @@ async function runMode(
     return;
   }
 
-  const clean = await resolveRestoreClean({
-    engine,
-    intoExisting: !destCreated,
-    yes: opts.yes,
-  });
+  const clean = await resolveRestoreClean({ intoExisting: !destCreated, yes: opts.yes });
 
-  const dir = dbDumpDir(dumpsRoot, engine, sourceItem.key);
+  const dir = dbDumpDir(dumpsRoot, sourceItem.key);
   await mkdir(dir, { recursive: true });
-  const plainName = newDumpFileName(engine, sourceItem.key);
-  await runDumpWithSpinner(
-    engine,
-    image,
-    sourceDb,
-    dir,
-    plainName,
-    sourceItem.key,
-  );
-
-  await runRestoreWithSpinner(
-    engine,
-    image,
-    destDb,
-    dir,
-    plainName,
-    destItem.key,
-    { clean },
-  );
+  const plainName = newDumpFileName(sourceItem.key);
+  await runDumpWithSpinner(image, sourceDb, dir, plainName, sourceItem.key);
+  await runRestoreWithSpinner(image, destDb, dir, plainName, destItem.key, { clean });
 
   let finalPath = join(dir, plainName);
   if (config.encryptedDump) {
@@ -652,8 +520,7 @@ async function runMain(opts: GlobalOpts): Promise<void> {
     setDockerDebug(true, (msg) => p.log.info(msg));
   }
 
-  const engineLabel = opts.engine ? ` (${opts.engine})` : "";
-  p.intro(`dumpmgr — Dump Manager, docker based db dump & restore tool${engineLabel}`);
+  p.intro(`dumpmgr — Dump Manager, docker based db dump & restore tool`);
   if (opts.debug) p.log.info("Debug mode on");
 
   try {
@@ -748,18 +615,12 @@ function addCommonOptions(cmd: Command): Command {
     .option("--debug", "Print docker/DB commands being executed");
 }
 
-function addModeCommands(parent: Command, engine?: Engine): void {
+function addModeCommands(parent: Command): void {
   for (const mode of ["dump", "restore", "dump-restore"] as const) {
     addCommonOptions(
       parent.command(mode).description(MODE_DESCRIPTIONS[mode]),
     ).action(async (opts: { config: string; yes?: boolean; debug?: boolean }) => {
-      await handleMain({
-        config: opts.config,
-        yes: opts.yes,
-        debug: opts.debug,
-        engine,
-        mode,
-      });
+      await handleMain({ config: opts.config, yes: opts.yes, debug: opts.debug, mode });
     });
   }
 }
@@ -771,7 +632,7 @@ addCommonOptions(
   program
     .name("dumpmgr")
     .description(
-      "Dump Manager — dump and restore Postgres / MySQL / MariaDB databases via Docker",
+      "Dump Manager — dump and restore Postgres databases via Docker",
     )
     .addHelpText(
       "after",
@@ -781,7 +642,6 @@ addCommonOptions(
         "  secret list         List stored DB password keys (no values)",
         "  secret wipe <key>   Remove a stored DB password by key",
         "  config {init|validate|lint}",
-        "  pg / mysql / mariadb  Lock the default action to one engine",
       ].join("\n"),
     ),
 ).action(async (opts: GlobalOpts) => {
@@ -789,30 +649,6 @@ addCommonOptions(
 });
 
 addModeCommands(program);
-
-function addEngineCommand(name: string, engine: Engine, aliases?: string[]) {
-  const cmd = addCommonOptions(
-    program
-      .command(name)
-      .description(`Run dumpmgr locked to ${engine}`)
-      .enablePositionalOptions(),
-  ).action(async (opts: { config: string; yes?: boolean; debug?: boolean }) => {
-    await handleMain({
-      config: opts.config,
-      yes: opts.yes,
-      debug: opts.debug,
-      engine,
-    });
-  });
-  if (aliases) {
-    for (const a of aliases) cmd.alias(a);
-  }
-  addModeCommands(cmd, engine);
-}
-
-addEngineCommand("pg", "postgres", ["postgres"]);
-addEngineCommand("mysql", "mysql");
-addEngineCommand("mariadb", "mariadb");
 
 // `dumpmgr doctor` — environment + metadata health check (no master unlock).
 program

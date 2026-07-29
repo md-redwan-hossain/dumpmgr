@@ -1,11 +1,10 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import * as p from "@clack/prompts";
-import type { Config, DatabaseItem, Engine, TreeDatabaseOption } from "./config.ts";
+import type { Config, DatabaseItem, TreeDatabaseOption } from "./config.ts";
 import {
-  ENGINES,
-  engineItemCount,
-  engineRestoreTreeItems,
+  configItemCount,
+  configRestoreTreeItems,
   needsMaster,
 } from "./config.ts";
 import { listDumpBrowserEntries } from "./dumps.ts";
@@ -52,24 +51,12 @@ export async function selectMode(config: Config): Promise<Mode> {
   return choice;
 }
 
-export async function selectEngine(config: Config, minItems: number): Promise<Engine> {
-  const available = ENGINES.filter((e) => engineItemCount(config, e) >= minItems);
-  if (available.length === 0) {
+export function requireItems(config: Config, minItems: number): void {
+  if (configItemCount(config) < minItems) {
     throw new Error(
-      `No engine has at least ${minItems} database item(s). Edit config.json.`,
+      `Need at least ${minItems} database item(s). Edit config.json.`,
     );
   }
-
-  const choice = await p.select({
-    message: "Select database engine",
-    options: available.map((e) => ({
-      value: e,
-      label: e,
-      hint: `${engineItemCount(config, e)} item(s)`,
-    })),
-  });
-  if (p.isCancel(choice)) onCancel();
-  return choice;
 }
 
 function itemHint(db: DatabaseItem): string {
@@ -99,11 +86,10 @@ export async function selectDatabaseItem(
 
 export async function selectDatabaseTree(
   config: Config,
-  engine: Engine,
   message: string,
   exclude?: string,
 ): Promise<DatabaseItem> {
-  const tree = engineRestoreTreeItems(config, engine).filter(
+  const tree = configRestoreTreeItems(config).filter(
     (i) => i.key !== exclude,
   );
   if (tree.length === 0) {
@@ -253,10 +239,9 @@ export async function promptConfirmedPassword(label: string): Promise<string> {
 export async function resolveDbPassword(opts: {
   session: Session | null;
   rememberPassword: boolean;
-  engine: Engine;
   item: DatabaseItem;
 }): Promise<string> {
-  const key = `${opts.engine}:${opts.item.key}`;
+  const key = `postgres:${opts.item.key}`;
   if (opts.rememberPassword && opts.session?.aesKey) {
     const existing = await getDbPassword(opts.session, key);
     if (existing) return existing;
