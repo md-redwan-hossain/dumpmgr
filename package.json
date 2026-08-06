@@ -7,7 +7,12 @@
     "dumpmgr": "./src/index.ts"
   },
   "scripts": {
-    "dumpmgr": "bun run src/index.ts"
+    "dumpmgr": "bun run src/index.ts",
+    "test": "bun run test:unit",
+    "test:unit": "bun test tests --path-ignore-patterns=tests/integration.test.ts",
+    "test:integration": "tsx tests/integration.test.ts",
+    "test:all": "bun run test:unit && bun run test:integration",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@clack/prompts": "^1.7.0",
@@ -18,7 +23,9 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@testcontainers/postgresql": "^12.1.0",
     "@types/bun": "^1.3.14",
+    "tsx": "^4.23.9",
     "typescript": "^5.9.3"
   }
 }

@@ -10,12 +10,16 @@ import {
 import { listDumpBrowserEntries } from "./dumps.ts";
 import type { Session } from "./metadata.ts";
 import { getDbPassword, setDbPassword } from "./metadata.ts";
+import type { S3Object } from "./s3.ts";
+import { formatS3Object } from "./s3.ts";
 
 export type Mode =
   | "dump-restore"
   | "dump"
   | "restore"
   | "change-master"
+  | "s3-upload"
+  | "s3-download"
   | "exit";
 
 export function onCancel(): never {
@@ -43,6 +47,12 @@ export async function selectMode(config: Config): Promise<Mode> {
       label: "Change master password",
       hint: "Rotate master + re-encrypt secrets",
     });
+  }
+  if (config.s3Options) {
+    options.push(
+      { value: "s3-upload", label: "Upload dump to S3", hint: "Copy a local dump to the configured bucket" },
+      { value: "s3-download", label: "Download dump from S3", hint: "Browse objects and download one locally" },
+    );
   }
   options.push({ value: "exit", label: "Exit" });
 
@@ -335,4 +345,18 @@ export async function browseDumpFile(
       return join(cwd, choice.slice(5));
     }
   }
+}
+
+export async function selectS3Object(objects: S3Object[]): Promise<string> {
+  if (objects.length === 0) throw new Error("No dump objects found in the S3 bucket");
+  const choice = await p.select({
+    message: "Select an S3 dump object",
+    options: objects.map((object) => ({
+      value: object.key,
+      label: object.key,
+      hint: formatS3Object(object),
+    })),
+  });
+  if (p.isCancel(choice)) onCancel();
+  return choice;
 }

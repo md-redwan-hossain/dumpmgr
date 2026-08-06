@@ -53,8 +53,10 @@ import {
   changeMasterPassword,
   deleteDbPassword,
   getDbPassword,
+  getS3SecretKey,
   metadataPathForConfig,
   setDbPassword,
+  setS3SecretKey,
   unlockSession,
   type Session,
 } from "./metadata.ts";
@@ -73,9 +75,18 @@ import {
   selectNestedCreatePassword,
   selectNestedRestoreAction,
   selectReplaceExistingObjects,
+  selectS3Object,
 } from "./prompt.ts";
+import {
+  createS3Client,
+  downloadFromS3,
+  listS3Objects,
+  uploadToS3,
+  verifyS3Bucket,
+} from "./s3.ts";
 
 type CliMode = "dump" | "restore" | "dump-restore";
+type S3Action = "upload" | "download";
 
 type GlobalOpts = {
   config: string;
@@ -98,6 +109,64 @@ async function unlockOrNull(config: Config, configPath: string): Promise<Session
       if (p.isCancel(again) || !again) onCancel();
     }
   }
+}
+
+async function requireS3Session(
+  config: Config,
+  configPath: string,
+): Promise<{ session: Session; secretAccessKey: string }> {
+  if (!config.s3Options) {
+    throw new Error("S3 is not configured. Add s3Options to config.jsonc.");
+  }
+  const session = await unlockOrNull(config, configPath);
+  if (!session) throw new Error("Master password session required for S3");
+  let secretAccessKey = await getS3SecretKey(session);
+  if (!secretAccessKey) {
+    secretAccessKey = await promptPassword("S3 secret access key");
+    await setS3SecretKey(session, secretAccessKey);
+    p.log.success("S3 secret access key encrypted in metadata");
+  }
+  return { session, secretAccessKey };
+}
+
+async function runS3Action(
+  action: S3Action,
+  config: Config,
+  configPath: string,
+  yes = false,
+): Promise<void> {
+  if (!config.s3Options) {
+    throw new Error("S3 is not configured. Add s3Options to config.jsonc.");
+  }
+  const { secretAccessKey } = await requireS3Session(config, configPath);
+  const client = createS3Client(config.s3Options, secretAccessKey);
+  await verifyS3Bucket(config.s3Options, secretAccessKey);
+  const dumpsRoot = resolveDumpsRoot(config.dumpDirectory);
+  await ensureDumpsRootWritable(dumpsRoot);
+
+  if (action === "upload") {
+    const localPath = await browseDumpFile(dumpsRoot, config.encryptedDump);
+    const key = await uploadToS3(client, dumpsRoot, localPath);
+    p.log.success(`Uploaded ${key} to ${config.s3Options.bucketName}`);
+    return;
+  }
+
+  const objects = await listS3Objects(config.s3Options, secretAccessKey);
+  const key = await selectS3Object(objects);
+  const localPath = resolveDumpsRoot(config.dumpDirectory);
+  const target = join(localPath, key);
+  if (await Bun.file(target).exists() && !yes) {
+    const overwrite = await p.confirm({
+      message: `${target} already exists. Overwrite?`,
+      initialValue: false,
+    });
+    if (p.isCancel(overwrite) || !overwrite) {
+      p.log.warn("Download cancelled");
+      return;
+    }
+  }
+  const downloaded = await downloadFromS3(client, dumpsRoot, key);
+  p.log.success(`Downloaded ${key} to ${downloaded}`);
 }
 
 async function resolveConnectedDb(opts: {
@@ -524,14 +593,6 @@ async function runMain(opts: GlobalOpts): Promise<void> {
   p.intro(`dumpmgr — Dump Manager, docker based db dump & restore tool`);
   if (opts.debug) p.log.info("Debug mode on");
 
-  try {
-    await assertDockerAvailable();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    p.log.error(message);
-    process.exit(1);
-  }
-
   const configPath = resolve(opts.config);
   if (!(await configExists(configPath))) {
     p.log.error(`Config file not found: ${configPath}`);
@@ -563,6 +624,7 @@ async function runMain(opts: GlobalOpts): Promise<void> {
 
   if (opts.mode) {
     try {
+      await assertDockerAvailable();
       await runMode(opts.mode, opts, config, session);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -584,6 +646,11 @@ async function runMain(opts: GlobalOpts): Promise<void> {
         session = await handleChangeMaster(config, session);
         continue;
       }
+      if (mode === "s3-upload" || mode === "s3-download") {
+        await runS3Action(mode === "s3-upload" ? "upload" : "download", config, configPath);
+        continue;
+      }
+      await assertDockerAvailable();
       await runMode(mode, opts, config, session);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -601,6 +668,27 @@ const MODE_DESCRIPTIONS: Record<CliMode, string> = {
 async function handleMain(opts: GlobalOpts): Promise<void> {
   try {
     await runMain(opts);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    p.log.error(message);
+    process.exit(1);
+  }
+}
+
+async function handleS3Command(
+  action: S3Action,
+  opts: { config: string; yes?: boolean },
+): Promise<void> {
+  const configPath = resolve(opts.config);
+  p.intro(`dumpmgr s3 ${action}`);
+  if (!(await configExists(configPath))) {
+    p.log.error(`Config file not found: ${configPath}`);
+    process.exit(1);
+  }
+  try {
+    const config = await loadConfigAsync(configPath);
+    await runS3Action(action, config, configPath, opts.yes);
+    p.outro("done");
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     p.log.error(message);
@@ -640,6 +728,8 @@ addCommonOptions(
       [
         "Auxiliary commands:",
         "  doctor              Check Docker / dumps dir / metadata integrity",
+        "  s3 upload           Upload a local dump to S3",
+        "  s3 download         Browse and download a dump from S3",
         "  secret list         List stored DB password keys (no values)",
         "  secret wipe <key>   Remove a stored DB password by key",
         "  config {init|validate|lint}",
@@ -650,6 +740,21 @@ addCommonOptions(
 });
 
 addModeCommands(program);
+
+const s3Cmd = program
+  .command("s3")
+  .description("Manually upload or download dumps using configured S3");
+
+for (const action of ["upload", "download"] as const) {
+  s3Cmd
+    .command(action)
+    .description(action === "upload" ? "Upload a local dump to S3" : "Browse and download a dump from S3")
+    .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
+    .option("--yes", "Overwrite an existing local download")
+    .action(async (opts: { config: string; yes?: boolean }) => {
+      await handleS3Command(action, opts);
+    });
+}
 
 // `dumpmgr doctor` — environment + metadata health check (no master unlock).
 program

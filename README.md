@@ -18,12 +18,27 @@ Requires Docker. Prefer official Debian-based images (e.g. `postgres:18`). Avoid
 
 `config init` creates `config.jsonc` and a binary `metadata` file in the same directory. There is no example config file — use `config init`. Comments (`//`, `/* */`) and trailing commas are allowed.
 
+## Testing
+
+```bash
+bun run test:unit         # fast tests; no Docker required
+bun run test:integration  # disposable Postgres via Testcontainers
+bun run typecheck
+bun run test:all
+```
+
+The integration suite requires a running Docker daemon and downloads the configured
+Postgres test image on its first run. Unit tests use isolated temporary directories
+and do not modify the project config or metadata files.
+
 ## Commands / flags
 
 | Command / flag | Description |
 |----------------|-------------|
 | `(default)` | Interactive dump / restore / sync / change master |
 | `doctor` | Health check: Docker daemon, dumps dir permissions, metadata magic/version, kdfSalt/master hash presence |
+| `s3 upload` | Interactively choose a local dump and upload it to configured S3 |
+| `s3 download` | Browse configured S3 dump objects and download one under `dumps/` |
 | `secret list` | List stored DB password keys (`postgres:<item>`); values are never displayed |
 | `secret wipe <key>` | Remove a saved DB password by key (e.g. `postgres:prod`) |
 | `config init` | Scaffold `config.jsonc` + binary `metadata` (asks about fake data) |
@@ -54,6 +69,15 @@ JSONC: `//` line comments, `/* */` block comments, and trailing commas are allow
   "encryptedDump": false,
   "dumpDirectory": ".",
   "image": "postgres:18", // Docker image for pg_dump / pg_restore
+  "s3Options": {
+    "endpoint": "https://s3.example.com",
+    "accessKey": "your-access-key",
+    "bucketName": "your-bucket",
+    "createBucketIfNotExists": false,
+    "useHttps": true,
+    "region": "us-east-1",
+    "forcePathStyle": true,
+  },
   "items": {
     "prod": {
       "host": "127.0.0.1",
@@ -84,6 +108,7 @@ JSONC: `//` line comments, `/* */` block comments, and trailing commas are allow
 | `encryptedDump` | Encrypt dump files with the master-derived AES key |
 | `dumpDirectory` | Base directory for dumps (default `.` → `./dumps`) |
 | `image` | Docker image (optional; default `postgres:18`) |
+| `s3Options` | Optional S3-compatible storage settings for manual upload/download |
 | `items` | Named map of targets. Fields: `host`, `port`, `user`, `database`, `readonly` (default `false`). **No password field.** |
 
 ### Nested items (one level)
@@ -109,6 +134,28 @@ Only meaningful on parents that have nested `items` (destination / restore tree)
 Dump source picker can still select the parent even when `readonly` is true.
 
 If `dumpDirectory` already ends with a `dumps` segment, that path is used as the dumps root; otherwise `{dumpDirectory}/dumps` is created. The tool checks the directory is writable before dumping.
+
+### S3-compatible storage
+
+S3 support uses Bun's native `S3Client`; no AWS SDK dependency is required. It is
+manual and separate from the normal dump/restore flow:
+
+```powershell
+bun run dumpmgr s3 upload
+bun run dumpmgr s3 download
+```
+
+The `endpoint`, `accessKey`, `bucketName`, `createBucketIfNotExists`,
+`useHttps`, optional `region`, and `forcePathStyle` fields are lower camel case.
+The secret access key is never placed in JSON. On first S3 use, dumpmgr prompts
+for it and stores AES-256-GCM ciphertext in the binary `metadata` file, protected
+by the master password. Existing buckets must be created ahead of time because
+Bun's native S3 API does not expose bucket creation.
+
+Uploads preserve the local dump layout as object keys, for example
+`prod/prod_2026-07-25_10-02-15.dump`. Downloads recreate that layout below the
+configured dumps root and reject path traversal keys. The interactive menu also
+contains the upload and download actions when `s3Options` is configured.
 
 ## Security / metadata
 

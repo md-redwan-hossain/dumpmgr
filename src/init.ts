@@ -53,7 +53,7 @@ export async function runInit(opts: InitOptions): Promise<void> {
   let withFakeData = opts.withFakeData;
   if (withFakeData === undefined) {
     const fake = await p.confirm({
-      message: "Populate with fake sample database items?",
+      message: "Populate with dummy data?",
       initialValue: false,
     });
     if (p.isCancel(fake)) onCancel();
@@ -115,7 +115,7 @@ export async function runInit(opts: InitOptions): Promise<void> {
   }
   p.outro(
     withFakeData
-      ? "Edit config.jsonc (replace fake hosts/users) before running dumpmgr."
+      ? "Edit config.jsonc (replace fake database and S3 settings) before running dumpmgr."
       : "Add database items to config.jsonc, then run dumpmgr.",
   );
 }

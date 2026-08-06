@@ -163,6 +163,15 @@ export async function runDoctor(
   const magic = await checkMetadataMagic(metaPath);
   checks.push({ name: "metadata-magic", ...magic });
 
+  if (config.s3Options) {
+    checks.push({
+      name: "s3-config",
+      ok: true,
+      message: `S3 configured: ${config.s3Options.endpoint}/${config.s3Options.bucketName}`,
+      hint: "S3 credentials are checked by `dumpmgr s3 upload` or `dumpmgr s3 download` after master unlock.",
+    });
+  }
+
   // KDF salt + master hash + encId (only meaningful if we can decode the body)
   if (magic.ok) {
     try {

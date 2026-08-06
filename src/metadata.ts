@@ -16,6 +16,8 @@ export const MetadataSchema = z.object({
   kdfSalt: z.string().nullable().optional(),
   dbPasswords: z.record(z.string(), z.string()).default({}),
   encId: z.string().nullable().optional(),
+  /** AES-GCM ciphertext for the S3 secret access key. */
+  s3SecretKey: z.string().nullable().optional(),
 });
 
 export type Metadata = z.infer<typeof MetadataSchema>;
@@ -122,6 +124,7 @@ export async function createMetadataWithMaster(
     kdfSalt: newKdfSalt(),
     dbPasswords: {},
     encId: newEncId(),
+    s3SecretKey: null,
   };
   await writeMetadata(path, meta);
   return meta;
@@ -133,6 +136,7 @@ export async function emptyMetadata(path: string): Promise<Metadata> {
     kdfSalt: null,
     dbPasswords: {},
     encId: null,
+    s3SecretKey: null,
   };
   await writeMetadata(path, meta);
   return meta;
@@ -146,18 +150,20 @@ export async function unlockSession(
   if (!metadata.masterPassword || !metadata.kdfSalt) {
     throw new Error("metadata has no master password; run config init again");
   }
+  const masterHash = metadata.masterPassword;
+  const kdfSalt = metadata.kdfSalt;
   if (!metadata.encId) {
     metadata = { ...metadata, encId: newEncId() };
     await writeMetadata(metadataPath, metadata);
   }
   const ok = await verifyMasterPassword(
     masterPassword,
-    metadata.masterPassword,
+    masterHash,
   );
   if (!ok) {
     throw new Error("Incorrect master password");
   }
-  const aesKey = await deriveAesKey(masterPassword, metadata.kdfSalt);
+  const aesKey = await deriveAesKey(masterPassword, kdfSalt);
   return { masterPassword, aesKey, metadata, metadataPath };
 }
 
@@ -182,6 +188,22 @@ export async function setDbPassword(
     session.aesKey,
     password,
   );
+  await writeMetadata(session.metadataPath, session.metadata);
+}
+
+export async function getS3SecretKey(session: Session): Promise<string | null> {
+  if (!session.metadata.s3SecretKey || !session.aesKey) return null;
+  return decryptSecret(session.aesKey, session.metadata.s3SecretKey);
+}
+
+export async function setS3SecretKey(
+  session: Session,
+  secretKey: string,
+): Promise<void> {
+  if (!session.aesKey) {
+    throw new Error("AES key missing; master password required");
+  }
+  session.metadata.s3SecretKey = await encryptSecret(session.aesKey, secretKey);
   await writeMetadata(session.metadataPath, session.metadata);
 }
 
@@ -222,6 +244,7 @@ export async function changeMasterPassword(
     kdfSalt,
     dbPasswords,
     encId,
+    s3SecretKey: session.metadata.s3SecretKey ?? null,
   };
   await writeMetadata(session.metadataPath, metadata);
   return {

@@ -113,6 +113,8 @@ function pgBaseArgs(
   volume?: string,
 ): string[] {
   const args = ["run", "--rm", "-e", `PGPASSWORD=${password}`];
+  const network = process.env.DUMPMGR_DOCKER_NETWORK;
+  if (network) args.push("--network", network);
   if (volume) args.push("-v", volume);
   args.push(image);
   return args;

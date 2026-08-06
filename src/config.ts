@@ -39,18 +39,33 @@ export type DatabaseItem = {
   parentKey?: string;
 };
 
+export const S3OptionsSchema = z
+  .object({
+    endpoint: z.string().min(1),
+    accessKey: z.string().min(1),
+    bucketName: z.string().min(1),
+    createBucketIfNotExists: z.boolean().default(false),
+    useHttps: z.boolean().default(true),
+    region: z.string().min(1).optional(),
+    forcePathStyle: z.boolean().default(true),
+  })
+  .strict();
+
+export type S3Options = z.infer<typeof S3OptionsSchema>;
+
 export const ConfigSchema = z.object({
   rememberPassword: z.boolean().default(true),
   encryptedDump: z.boolean().default(false),
   dumpDirectory: z.string().default("."),
   image: z.string().min(1).optional(),
+  s3Options: S3OptionsSchema.optional(),
   items: z.record(z.string(), DatabaseEntrySchema).default({}),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
 
 export function needsMaster(config: Config): boolean {
-  return config.rememberPassword || config.encryptedDump;
+  return config.rememberPassword || config.encryptedDump || Boolean(config.s3Options);
 }
 
 export function configImage(config: Config): string {
@@ -167,6 +182,7 @@ export function defaultConfigScaffold(withFakeData: boolean): Config {
       encryptedDump: false,
       dumpDirectory: ".",
       image: DEFAULT_IMAGE,
+      s3Options: undefined,
       items: {},
     };
   }
@@ -175,6 +191,15 @@ export function defaultConfigScaffold(withFakeData: boolean): Config {
     encryptedDump: false,
     dumpDirectory: ".",
     image: DEFAULT_IMAGE,
+    s3Options: {
+      endpoint: "http://127.0.0.1:9000",
+      accessKey: "minioadmin",
+      bucketName: "dumpmgr-demo",
+      createBucketIfNotExists: false,
+      useHttps: false,
+      region: "us-east-1",
+      forcePathStyle: true,
+    },
     items: {
       prod: entry({
         host: "127.0.0.1",
@@ -282,6 +307,7 @@ export async function validateConfigFile(
     `rememberPassword: ${config.rememberPassword}`,
     `encryptedDump: ${config.encryptedDump}`,
     `dumpDirectory: ${config.dumpDirectory}`,
+    `s3Options: ${config.s3Options ? `${config.s3Options.endpoint}/${config.s3Options.bucketName}` : "disabled"}`,
     "",
     `image=${image}  parents=${entries.length}  nested=${nestedCount}`,
   ];

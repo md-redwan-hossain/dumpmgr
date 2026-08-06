@@ -51,7 +51,7 @@ export async function deriveAesKey(
     ...ARGON_OPTS,
     outputType: "binary",
   });
-  return crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, [
+  return crypto.subtle.importKey("raw", raw as Uint8Array<ArrayBuffer>, { name: "AES-GCM" }, false, [
     "encrypt",
     "decrypt",
   ]);
@@ -69,7 +69,7 @@ export async function encryptSecret(
   const iv = randomBytes(12);
   const encoded = new TextEncoder().encode(plaintext);
   const cipher = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoded),
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv as Uint8Array<ArrayBuffer> }, key, encoded as Uint8Array<ArrayBuffer>),
   );
   const out = new Uint8Array(iv.length + cipher.length);
   out.set(iv, 0);
@@ -98,7 +98,7 @@ export async function encryptBytes(
 ): Promise<Uint8Array> {
   const iv = randomBytes(12);
   const cipher = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, data),
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv as Uint8Array<ArrayBuffer> }, key, data as Uint8Array<ArrayBuffer>),
   );
   const out = new Uint8Array(iv.length + cipher.length);
   out.set(iv, 0);
