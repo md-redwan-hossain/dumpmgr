@@ -63,8 +63,16 @@ async function waitForPostgres(
       "-d",
       pg.database,
     ]);
-    if (ready.exitCode === 0) return;
-    await Bun.sleep(500);
+    if (ready.exitCode !== 0) {
+      await Bun.sleep(500);
+      continue;
+    }
+    try {
+      await execSql(pg, "SELECT 1", pg.database);
+      return;
+    } catch {
+      await Bun.sleep(500);
+    }
   }
   throw new Error("Postgres container did not become ready in time");
 }
@@ -123,7 +131,7 @@ export async function withPostgres<T>(
     "-e",
     `POSTGRES_DB=${database}`,
     "-p",
-    "127.0.0.1::5432",
+    "0:5432",
     INTEGRATION_POSTGRES_IMAGE,
   ]);
   if (started.exitCode !== 0) {
