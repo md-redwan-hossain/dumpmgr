@@ -33,14 +33,15 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Finder (MacOS) folder config
 .DS_Store
 
-# dumpmgr
-config.jsonc
-config.json
-metadata
-dumps/
+# dumpmgr runtime artifacts (project root only)
+/config.jsonc
+/config.json
+/metadata
+/dumps/
 .dumpmgr
 *.dump
 *.sql
 *.enc
-dumpmgr*
+/dumpmgr
+/dumpmgr.exe
 .puku/**
