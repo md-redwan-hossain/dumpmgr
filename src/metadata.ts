@@ -239,12 +239,17 @@ export async function changeMasterPassword(
   }
 
   const encId = session.metadata.encId || newEncId();
+  let s3SecretKey: string | null = null;
+  if (session.metadata.s3SecretKey) {
+    const plain = await decryptSecret(session.aesKey, session.metadata.s3SecretKey);
+    s3SecretKey = await encryptSecret(newKey, plain);
+  }
   const metadata: Metadata = {
     masterPassword: await hashMasterPassword(newMaster),
     kdfSalt,
     dbPasswords,
     encId,
-    s3SecretKey: session.metadata.s3SecretKey ?? null,
+    s3SecretKey,
   };
   await writeMetadata(session.metadataPath, metadata);
   return {

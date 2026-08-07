@@ -241,6 +241,31 @@ export async function readConfigFile(path: string): Promise<unknown> {
   }
 }
 
+export function validateEncryptedDumpPolicy(config: Config): string | null {
+  if (config.encryptedDump && !config.rememberPassword) {
+    return (
+      'encryptedDump requires rememberPassword: true (encrypted dumps need the master-derived AES key)'
+    );
+  }
+  return null;
+}
+
+export function findDatabaseItem(
+  config: Config,
+  key: string,
+): DatabaseItem | null {
+  return configItems(config).find((item) => item.key === key) ?? null;
+}
+
+export function findRestoreDestination(
+  config: Config,
+  key: string,
+): DatabaseItem | null {
+  const item = configRestoreTreeItems(config).find((i) => i.key === key);
+  if (!item || item.disabled) return null;
+  return item;
+}
+
 export async function loadConfigAsync(path: string): Promise<Config> {
   const raw = await readConfigFile(path);
   const result = ConfigSchema.safeParse(raw);
@@ -249,6 +274,11 @@ export async function loadConfigAsync(path: string): Promise<Config> {
       .map((i) => `  - ${i.path.join(".") || "(root)"}: ${i.message}`)
       .join("\n");
     throw new Error(`Invalid config (${path}):\n${details}`);
+  }
+
+  const policyError = validateEncryptedDumpPolicy(result.data);
+  if (policyError) {
+    throw new Error(`Invalid config (${path}):\n  - ${policyError}`);
   }
 
   return result.data;
@@ -295,6 +325,11 @@ export async function validateConfigFile(
   }
 
   const config = result.data;
+  const policyError = validateEncryptedDumpPolicy(config);
+  if (policyError) {
+    return { ok: false, issues: [policyError] };
+  }
+
   const image = configImage(config);
   const entries = Object.entries(config.items);
   const nestedCount = entries.reduce(

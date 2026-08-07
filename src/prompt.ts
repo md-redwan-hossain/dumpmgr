@@ -94,6 +94,25 @@ export async function selectDatabaseItem(
   return list.find((i) => i.key === choice)!;
 }
 
+export function resolveDatabaseItem(
+  items: DatabaseItem[],
+  key: string | undefined,
+  message: string,
+  exclude?: string,
+): Promise<DatabaseItem> {
+  if (key) {
+    if (key === exclude) {
+      throw new Error(`Cannot use "${key}" as source/destination.`);
+    }
+    const item = items.find((i) => i.key === key);
+    if (!item) {
+      throw new Error(`Unknown database "${key}". Check config.jsonc items.`);
+    }
+    return Promise.resolve(item);
+  }
+  return selectDatabaseItem(items, message, exclude);
+}
+
 export async function selectDatabaseTree(
   config: Config,
   message: string,
@@ -124,6 +143,29 @@ export async function selectDatabaseTree(
     throw new Error(`"${selected.key}" is readonly and cannot be a restore destination.`);
   }
   return selected;
+}
+
+export function resolveDatabaseTree(
+  config: Config,
+  key: string | undefined,
+  message: string,
+  exclude?: string,
+): Promise<DatabaseItem> {
+  if (key) {
+    if (key === exclude) {
+      throw new Error(`Cannot use "${key}" as source/destination.`);
+    }
+    const tree = configRestoreTreeItems(config);
+    const item = tree.find((i) => i.key === key);
+    if (!item) {
+      throw new Error(`Unknown database "${key}". Check config.jsonc items.`);
+    }
+    if (item.disabled) {
+      throw new Error(`"${key}" is readonly and cannot be a restore destination.`);
+    }
+    return Promise.resolve(item);
+  }
+  return selectDatabaseTree(config, message, exclude);
 }
 
 export async function promptPassword(message: string): Promise<string> {

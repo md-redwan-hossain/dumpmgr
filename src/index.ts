@@ -10,7 +10,6 @@ import {
   configItems,
   dbKey,
   DEFAULT_CONFIG_PATH,
-  getParentItem,
   lintConfigFile,
   loadConfigAsync,
   needsMaster,
@@ -21,12 +20,8 @@ import {
 import { runDoctor } from "./doctor.ts";
 import {
   assertDockerAvailable,
-  createDatabase,
-  databaseExists,
-  dropDatabase,
   DUMP_COMPRESS,
   dumpDatabase,
-  ensureDatabaseLogin,
   restoreDatabase,
   restoreJobs,
   setDockerDebug,
@@ -52,7 +47,6 @@ import { runInit } from "./init.ts";
 import {
   changeMasterPassword,
   deleteDbPassword,
-  getDbPassword,
   getS3SecretKey,
   metadataPathForConfig,
   setDbPassword,
@@ -65,18 +59,16 @@ import {
   confirmOrYes,
   connectWithRetry,
   onCancel,
-  promptConfirmedPassword,
   promptPassword,
   requireItems,
   resolveDbPassword,
-  selectDatabaseItem,
-  selectDatabaseTree,
+  resolveDatabaseItem,
+  resolveDatabaseTree,
   selectMode,
-  selectNestedCreatePassword,
-  selectNestedRestoreAction,
   selectReplaceExistingObjects,
   selectS3Object,
 } from "./prompt.ts";
+import { prepareRestoreDestination } from "./restore-dest.ts";
 import {
   createS3Client,
   downloadFromS3,
@@ -93,6 +85,9 @@ type GlobalOpts = {
   yes?: boolean;
   debug?: boolean;
   mode?: CliMode;
+  source?: string;
+  dest?: string;
+  dump?: string;
 };
 
 async function unlockOrNull(config: Config, configPath: string): Promise<Session | null> {
@@ -272,29 +267,6 @@ async function resolveRestoreClean(opts: {
   return selectReplaceExistingObjects(opts.yes);
 }
 
-async function ensureDestDatabase(
-  config: Config,
-  dest: ResolvedDb,
-  destName: string,
-  yes?: boolean,
-): Promise<{ created: boolean }> {
-  const image = configImage(config);
-  const exists = await databaseExists(image, dest);
-  if (exists) return { created: false };
-  const create = await confirmOrYes(
-    `Database "${dest.database}" does not exist on destination (${destName}). Create it?`,
-    yes,
-    false,
-  );
-  if (!create) {
-    throw new Error("Destination database does not exist. Aborted.");
-  }
-  p.log.step(`Creating database "${dest.database}"…`);
-  await createDatabase(image, dest);
-  p.log.success(`Created "${dest.database}"`);
-  return { created: true };
-}
-
 async function handleChangeMaster(
   config: Config,
   session: Session,
@@ -350,7 +322,11 @@ async function runMode(
   await ensureDumpsRootWritable(dumpsRoot);
 
   if (mode === "dump") {
-    const sourceItem = await selectDatabaseItem(items, "Select database to dump");
+    const sourceItem = await resolveDatabaseItem(
+      items,
+      opts.source,
+      "Select database to dump",
+    );
     const sourceDb = await resolveConnectedDb({
       config,
       session,
@@ -378,121 +354,34 @@ async function runMode(
   }
 
   if (mode === "restore") {
-    const dumpPath = await browseDumpFile(dumpsRoot, config.encryptedDump);
+    const dumpPath = opts.dump
+      ? resolve(opts.dump)
+      : await browseDumpFile(dumpsRoot, config.encryptedDump);
+    if (opts.dump && !(await Bun.file(dumpPath).exists())) {
+      throw new Error(`Dump file not found: ${dumpPath}`);
+    }
     const fileName = basename(dumpPath);
     const dir = dirname(dumpPath);
 
-    const destItem = await selectDatabaseTree(config, "Select destination database");
+    const destItem = await resolveDatabaseTree(
+      config,
+      opts.dest,
+      "Select destination database",
+    );
 
-    let destDb: ResolvedDb;
-    let intoExisting = false;
-
-    if (destItem.nested && destItem.parentKey) {
-      const parentItem = getParentItem(config, destItem.parentKey);
-      if (!parentItem) {
-        throw new Error(
-          `Nested destination "${destItem.key}" needs parent "${destItem.parentKey}" with user+database for connection verify.`,
-        );
-      }
-
-      p.log.step(`Verifying parent "${parentItem.key}"…`);
-      const parentDb = await resolveConnectedDb({
-        config,
-        session,
-        item: parentItem,
-        role: "destination",
-      });
-      p.log.success(`Parent "${parentItem.key}" OK`);
-
-      const parentLogin = parentDb.database;
-      const childTarget = { ...parentDb, database: destItem.database };
-      const connectOpts = { connectDatabase: parentLogin };
-
-      const childExists = await databaseExists(image, childTarget, connectOpts);
-
-      const action = await selectNestedRestoreAction(
-        `Restore "${fileName}" into "${destItem.key}"?`,
-        childExists,
-      );
-      if (action === "no") {
-        p.log.warn("Restore cancelled");
-        return;
-      }
-
-      if (action === "drop") {
-        p.log.step(`Dropping database "${destItem.database}"…`);
-        await dropDatabase(image, childTarget, connectOpts);
-        p.log.step(`Creating database "${destItem.database}"…`);
-        await createDatabase(image, childTarget, connectOpts);
-        p.log.success(`Recreated "${destItem.database}"`);
-      } else if (action === "create") {
-        p.log.step(`Creating database "${destItem.database}"…`);
-        await createDatabase(image, childTarget, connectOpts);
-        p.log.success(`Created "${destItem.database}"`);
-      }
-
-      if (action === "create" || action === "drop") {
-        if (parentDb.user === destItem.user) {
-          destDb = { ...destItem, user: parentDb.user, password: parentDb.password };
-        } else {
-          const childKey = dbKey(destItem.key);
-          const saved =
-            session && config.rememberPassword
-              ? await getDbPassword(session, childKey)
-              : null;
-          const pwSource = opts.yes
-            ? "parent"
-            : await selectNestedCreatePassword({ hasSaved: Boolean(saved) });
-
-          if (pwSource === "parent") {
-            destDb = { ...destItem, user: parentDb.user, password: parentDb.password };
-          } else if (pwSource === "saved") {
-            if (!saved) throw new Error(`No saved password for "${destItem.key}"`);
-            destDb = { ...destItem, password: saved };
-          } else {
-            const password = await promptConfirmedPassword(
-              `password for ${destItem.key} (${destItem.user})`,
-            );
-            p.log.step(`Ensuring login "${destItem.user}"…`);
-            await ensureDatabaseLogin(image, parentDb, {
-              user: destItem.user,
-              password,
-              database: destItem.database,
-              connectDatabase: parentLogin,
-            });
-            if (config.rememberPassword && session) {
-              await setDbPassword(session, childKey, password);
-            }
-            destDb = { ...destItem, password };
-            p.log.success(`Login "${destItem.user}" ready`);
-          }
-        }
-      } else {
-        // action === "yes": restore into existing with parent creds
-        intoExisting = true;
-        destDb = { ...destItem, user: parentDb.user, password: parentDb.password };
-      }
-    } else {
-      destDb = await resolveConnectedDb({
-        config,
-        session,
-        item: destItem,
-        role: "destination",
-        maintenance: true,
-      });
-      const { created } = await ensureDestDatabase(config, destDb, destItem.key, opts.yes);
-      intoExisting = !created;
-
-      const confirmed = await confirmOrYes(
-        `Restore "${fileName}" into "${destItem.key}"?`,
-        opts.yes,
-        false,
-      );
-      if (!confirmed) {
-        p.log.warn("Restore cancelled");
-        return;
-      }
+    const prepared = await prepareRestoreDestination({
+      config,
+      session,
+      destItem,
+      image,
+      yes: opts.yes,
+      confirmMessage: `Restore "${fileName}" into "${destItem.key}"?`,
+    });
+    if ("cancelled" in prepared) {
+      p.log.warn("Restore cancelled");
+      return;
     }
+    const { destDb, intoExisting } = prepared;
 
     const clean = await resolveRestoreClean({ intoExisting, yes: opts.yes });
 
@@ -523,23 +412,33 @@ async function runMode(
   }
 
   // dump-restore
-  const sourceItem = await selectDatabaseItem(items, "Select source database");
-  const destItem = await selectDatabaseTree(config, "Select destination database", sourceItem.key);
+  const sourceItem = await resolveDatabaseItem(
+    items,
+    opts.source,
+    "Select source database",
+  );
+  const destItem = await resolveDatabaseTree(
+    config,
+    opts.dest,
+    "Select destination database",
+    sourceItem.key,
+  );
 
   const sourceDb = await resolveConnectedDb({ config, session, item: sourceItem, role: "source" });
-  const destDb = await resolveConnectedDb({
+
+  const prepared = await prepareRestoreDestination({
     config,
     session,
-    item: destItem,
-    role: "destination",
-    maintenance: true,
+    destItem,
+    image,
+    yes: opts.yes,
+    confirmMessage: `Sync into "${destItem.key}"?`,
   });
-  const { created: destCreated } = await ensureDestDatabase(
-    config,
-    destDb,
-    destItem.key,
-    opts.yes,
-  );
+  if ("cancelled" in prepared) {
+    p.log.warn("Sync cancelled");
+    return;
+  }
+  const { destDb, intoExisting: destIntoExisting } = prepared;
 
   p.note(
     [
@@ -563,7 +462,7 @@ async function runMode(
     return;
   }
 
-  const clean = await resolveRestoreClean({ intoExisting: !destCreated, yes: opts.yes });
+  const clean = await resolveRestoreClean({ intoExisting: destIntoExisting, yes: opts.yes });
 
   const dir = dbDumpDir(dumpsRoot, sourceItem.key);
   await mkdir(dir, { recursive: true });
@@ -613,13 +512,7 @@ async function runMain(opts: GlobalOpts): Promise<void> {
   }
 
   const config = await loadConfigAsync(configPath);
-  if (config.encryptedDump && !config.rememberPassword) {
-    p.log.warn(
-      `encryptedDump is true but rememberPassword is false. ` +
-        `Encrypted dumps need the master-derived AES key, so set ` +
-        `"rememberPassword": true in config.jsonc (or disable encryptedDump).`,
-    );
-  }
+
   let session = await unlockOrNull(config, configPath);
 
   if (opts.mode) {
@@ -701,16 +594,36 @@ function addCommonOptions(cmd: Command): Command {
   return cmd
     .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
     .option("--yes", "Skip confirms; auto-create missing dest DB")
-    .option("--debug", "Print docker/DB commands being executed");
+    .option("--debug", "Print docker/DB commands being executed")
+    .option("--source <key>", "Database item key (skip interactive picker)")
+    .option("--dest <key>", "Destination item key (skip interactive picker)")
+    .option("--dump <path>", "Dump file path for restore (skip interactive browser)");
 }
 
 function addModeCommands(parent: Command): void {
   for (const mode of ["dump", "restore", "dump-restore"] as const) {
     addCommonOptions(
       parent.command(mode).description(MODE_DESCRIPTIONS[mode]),
-    ).action(async (opts: { config: string; yes?: boolean; debug?: boolean }) => {
-      await handleMain({ config: opts.config, yes: opts.yes, debug: opts.debug, mode });
-    });
+    ).action(
+      async (opts: {
+        config: string;
+        yes?: boolean;
+        debug?: boolean;
+        source?: string;
+        dest?: string;
+        dump?: string;
+      }) => {
+        await handleMain({
+          config: opts.config,
+          yes: opts.yes,
+          debug: opts.debug,
+          mode,
+          source: opts.source,
+          dest: opts.dest,
+          dump: opts.dump,
+        });
+      },
+    );
   }
 }
 
