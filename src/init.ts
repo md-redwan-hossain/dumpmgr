@@ -9,10 +9,10 @@ import {
 import {
   changeMasterPassword,
   createMetadataWithMaster,
+  dbPathForConfig,
   emptyMetadata,
-  loadMetadata,
-  metadataPathForConfig,
   unlockSession,
+  vaultHasMaster,
 } from "./metadata.ts";
 import { onCancel, promptPassword } from "./prompt.ts";
 
@@ -36,7 +36,7 @@ async function promptNewMasterPair(): Promise<string> {
 
 export async function runInit(opts: InitOptions): Promise<void> {
   const configPath = resolve(opts.config);
-  const metaPath = metadataPathForConfig(configPath);
+  const vaultPath = dbPathForConfig(configPath);
 
   if (await configExists(configPath)) {
     const overwrite = await p.confirm({
@@ -64,12 +64,11 @@ export async function runInit(opts: InitOptions): Promise<void> {
   await writeConfigAsync(configPath, config);
 
   if (needsMaster(config)) {
-    const existing = await loadMetadata(metaPath);
-    const hasMaster = Boolean(existing.masterPassword && existing.kdfSalt);
+    const hasMaster = await vaultHasMaster(configPath);
 
     if (hasMaster) {
       const action = await p.select({
-        message: "Existing master password found in metadata",
+        message: "Existing master password found in vault",
         options: [
           {
             value: "change",
@@ -89,29 +88,31 @@ export async function runInit(opts: InitOptions): Promise<void> {
         const current = await promptPassword("current master password");
         let session;
         try {
-          session = await unlockSession(metaPath, current);
+          session = await unlockSession(configPath, current);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           p.cancel(message);
           process.exit(1);
         }
         const next = await promptNewMasterPair();
-        await changeMasterPassword(session, next);
+        const updated = await changeMasterPassword(session, next);
+        updated.db.close();
         p.log.success("Master password updated");
       }
     } else {
       const master = await promptNewMasterPair();
-      await createMetadataWithMaster(metaPath, master);
+      const session = await createMetadataWithMaster(configPath, master);
+      session.db.close();
     }
   } else {
-    await emptyMetadata(metaPath);
+    await emptyMetadata(configPath);
   }
 
   p.log.success(`Wrote ${configPath}`);
   if (needsMaster(config)) {
-    p.log.success(`metadata ready at ${metaPath}`);
+    p.log.success(`vault ready at ${vaultPath}`);
   } else {
-    p.log.success(`Wrote ${metaPath}`);
+    p.log.success(`vault initialized at ${vaultPath}`);
   }
   p.outro(
     withFakeData

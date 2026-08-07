@@ -7,6 +7,7 @@ import (
 	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/config"
 	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/metadata"
 	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/prompt"
+	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/vault"
 )
 
 type Options struct {
@@ -16,7 +17,7 @@ type Options struct {
 
 func Run(opts Options) error {
 	configPath := config.ResolvePath(opts.Config)
-	metaPath := metadata.PathForConfig(configPath)
+	vaultPath := metadata.DBPathForConfig(configPath)
 
 	if config.Exists(configPath) {
 		overwrite, err := prompt.ConfirmInitOverwrite(configPath)
@@ -46,13 +47,18 @@ func Run(opts Options) error {
 	}
 
 	if config.NeedsMaster(&cfg) {
-		existing, err := metadata.Load(metaPath)
+		store, err := vault.Open(configPath)
 		if err != nil {
 			return err
 		}
-		hasMaster := existing.MasterPassword != nil && existing.KdfSalt != nil
+		hasMaster, err := store.HasMaster()
+		if err != nil {
+			store.Close()
+			return err
+		}
 
 		if hasMaster {
+			store.Close()
 			action, err := prompt.SelectMasterAction()
 			if err != nil {
 				return err
@@ -64,39 +70,47 @@ func Run(opts Options) error {
 				if err != nil {
 					return err
 				}
-				session, err := metadata.Unlock(metaPath, current)
+				session, err := metadata.Unlock(configPath, current)
 				if err != nil {
 					return err
 				}
 				next, err := promptNewMasterPair()
 				if err != nil {
+					session.Close()
 					return err
 				}
-				if _, err := metadata.ChangeMasterPassword(session, next); err != nil {
+				updated, err := metadata.ChangeMasterPassword(session, next)
+				if err != nil {
 					return err
 				}
+				updated.Close()
 				fmt.Println("✓ Master password updated")
 			}
 		} else {
+			store.Close()
 			master, err := promptNewMasterPair()
 			if err != nil {
 				return err
 			}
-			if _, err := metadata.CreateWithMaster(metaPath, master); err != nil {
+			session, err := metadata.CreateWithMaster(configPath, master)
+			if err != nil {
 				return err
 			}
+			session.Close()
 		}
 	} else {
-		if _, err := metadata.Empty(metaPath); err != nil {
+		store, err := vault.Open(configPath)
+		if err != nil {
 			return err
 		}
+		store.Close()
 	}
 
 	fmt.Printf("✓ Wrote %s\n", configPath)
 	if config.NeedsMaster(&cfg) {
-		fmt.Printf("✓ metadata ready at %s\n", metaPath)
+		fmt.Printf("✓ vault ready at %s\n", vaultPath)
 	} else {
-		fmt.Printf("✓ Wrote %s\n", metaPath)
+		fmt.Printf("✓ vault initialized at %s\n", vaultPath)
 	}
 	if withFakeData {
 		fmt.Println("Edit config.jsonc (replace fake database and S3 settings) before running dumpmgr.")

@@ -6,16 +6,17 @@ import {
   encryptSecret,
 } from "../src/crypto.ts";
 import {
+  createMetadataWithMaster,
   deleteDbPassword,
   emptyMetadata,
   getDbPassword,
   getS3SecretKey,
-  loadMetadata,
   setDbPassword,
   setS3SecretKey,
-  type Session,
-  writeMetadata,
+  unlockSession,
 } from "../src/metadata.ts";
+import { rm } from "node:fs/promises";
+import { dbPathForConfig } from "../src/vault.ts";
 import { withTempDir } from "./helpers.ts";
 
 describe("crypto", () => {
@@ -35,54 +36,40 @@ describe("crypto", () => {
   });
 });
 
-describe("metadata", () => {
+describe("vault metadata", () => {
   test("persists encrypted DB and S3 secrets", async () => {
     await withTempDir(async (directory) => {
-      const path = `${directory}/metadata`;
-      const session: Session = {
-        masterPassword: "test-master",
-        aesKey: await crypto.subtle.generateKey(
-          { name: "AES-GCM", length: 256 },
-          false,
-          ["encrypt", "decrypt"],
-        ),
-        metadata: {
-          masterPassword: null,
-          kdfSalt: null,
-          dbPasswords: {},
-          encId: "A1B2",
-          s3SecretKey: null,
-        },
-        metadataPath: path,
-      };
-      await writeMetadata(path, session.metadata);
+      const configPath = `${directory}/config.jsonc`;
+      await Bun.write(configPath, "{}");
+      const session = await createMetadataWithMaster(configPath, "test-master");
       await setDbPassword(session, "postgres:prod", "db-secret");
       await setS3SecretKey(session, "s3-secret");
 
       expect(await getDbPassword(session, "postgres:prod")).toBe("db-secret");
       expect(await getS3SecretKey(session)).toBe("s3-secret");
-      expect((await Bun.file(path).arrayBuffer()).byteLength).toBeGreaterThan(5);
+      expect((await Bun.file(dbPathForConfig(configPath)).arrayBuffer()).byteLength).toBeGreaterThan(
+        100,
+      );
 
-      const reloaded: Session = {
-        ...session,
-        metadata: await loadMetadata(path),
-      };
+      const reloaded = await unlockSession(configPath, "test-master");
       expect(await getDbPassword(reloaded, "postgres:prod")).toBe("db-secret");
       expect(await getS3SecretKey(reloaded)).toBe("s3-secret");
       expect(await deleteDbPassword(reloaded, "postgres:prod")).toBe(true);
       expect(await deleteDbPassword(reloaded, "postgres:missing")).toBe(false);
       expect(await getDbPassword(reloaded, "postgres:prod")).toBeNull();
+      reloaded.db.close();
+      session.db.close();
     });
   });
 
-  test("creates empty metadata and migrates legacy JSON metadata", async () => {
+  test("creates empty vault and migrates legacy JSON metadata", async () => {
     await withTempDir(async (directory) => {
-      const emptyPath = `${directory}/empty`;
-      await emptyMetadata(emptyPath);
-      expect((await loadMetadata(emptyPath)).dbPasswords).toEqual({});
+      const configPath = `${directory}/config.jsonc`;
+      await emptyMetadata(configPath);
+      const vaultPath = dbPathForConfig(configPath);
+      expect(await Bun.file(vaultPath).exists()).toBe(true);
 
       const legacyPath = `${directory}/metadata.json`;
-      const binaryPath = `${directory}/metadata`;
       await Bun.write(
         legacyPath,
         JSON.stringify({
@@ -92,10 +79,14 @@ describe("metadata", () => {
           encId: null,
         }),
       );
-      const migrated = await loadMetadata(binaryPath);
-      expect(migrated.encId).toMatch(/^[A-F0-9]{32}$/);
-      expect(await Bun.file(legacyPath).exists()).toBe(false);
-      expect((await Bun.file(binaryPath).arrayBuffer()).byteLength).toBeGreaterThan(5);
+      await Bun.write(configPath, "{}");
+      await rm(vaultPath);
+      const { openVault, getEncId } = await import("../src/vault.ts");
+      const db = await openVault(configPath);
+      const id = getEncId(db);
+      expect(id).toMatch(/^[A-F0-9]{32}$/);
+      expect(await Bun.file(`${legacyPath}.bak`).exists()).toBe(true);
+      db.close();
     });
   });
 });

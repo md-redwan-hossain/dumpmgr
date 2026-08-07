@@ -31,8 +31,14 @@ Auxiliary commands:
   doctor              Check Docker / dumps dir / metadata integrity
   s3 upload           Upload a local dump to S3
   s3 download         Browse and download a dump from S3
-  secret list         List stored DB password keys (no values)
+  secret list         List stored DB password keys with metadata
+  secret history      Show rotation history for a secret key
   secret wipe <key>   Remove a stored DB password by key
+  vault status        Show SQLite vault summary
+  audit list          List audit log entries
+  dump-registry list  List indexed dumps with SHA-256
+  dump-registry scan  Index existing dumps under dumps/
+  restore-history list  List restore operations
   config {init|validate|lint}`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return handleMain(configPath, yes, debug, "")
@@ -47,6 +53,7 @@ Auxiliary commands:
 	addDoctorCommand(root, &configPath)
 	addSecretCommands(root, &configPath, &yes)
 	addConfigCommands(root, &configPath)
+	addInspectCommands(root, &configPath)
 
 	return root
 }
@@ -178,11 +185,11 @@ func addDoctorCommand(root *cobra.Command, configPath *string) {
 }
 
 func addSecretCommands(root *cobra.Command, configPath *string, yes *bool) {
-	secretCmd := &cobra.Command{Use: "secret", Short: "List or wipe saved DB passwords"}
+	secretCmd := &cobra.Command{Use: "secret", Short: "List, inspect, or wipe saved DB passwords"}
 
 	listCmd := &cobra.Command{
 		Use:   "list",
-		Short: "List stored DB password keys (values are never shown)",
+		Short: "List stored DB password keys with created/updated/last-used timestamps",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := config.ResolvePath(*configPath)
 			fmt.Println("dumpmgr secret list")
@@ -198,19 +205,40 @@ func addSecretCommands(root *cobra.Command, configPath *string, yes *bool) {
 				fmt.Println("nothing to list")
 				return nil
 			}
-			keys := app.SortedSecretKeys(session)
-			if len(keys) == 0 {
-				fmt.Println("No saved DB passwords.")
-			} else {
-				for _, k := range keys {
-					fmt.Println(k)
-				}
+			defer session.Close()
+			if err := printSecretList(session); err != nil {
+				return err
 			}
+			keys, _ := app.SortedSecretKeys(session)
 			fmt.Printf("%d stored\n", len(keys))
 			return nil
 		},
 	}
 	listCmd.Flags().StringVarP(configPath, "config", "c", config.DefaultConfigPath, "Path to config.jsonc")
+
+	historyCmd := &cobra.Command{
+		Use:   "history [key]",
+		Short: "Show rotation history for a secret key",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := config.ResolvePath(*configPath)
+			cfg, err := loadConfigOrExit(path, "config missing")
+			if err != nil {
+				return err
+			}
+			session, err := app.UnlockForSecretOps(cfg, path)
+			if err != nil {
+				return err
+			}
+			if session == nil {
+				return nil
+			}
+			defer session.Close()
+			fmt.Printf("dumpmgr secret history %s\n", args[0])
+			return printSecretHistory(session, args[0], 50)
+		},
+	}
+	historyCmd.Flags().StringVarP(configPath, "config", "c", config.DefaultConfigPath, "Path to config.jsonc")
 
 	wipeCmd := &cobra.Command{
 		Use:   "wipe [key]",
@@ -232,7 +260,12 @@ func addSecretCommands(root *cobra.Command, configPath *string, yes *bool) {
 				fmt.Println("nothing to wipe")
 				return nil
 			}
-			if _, ok := session.Metadata.DBPasswords[targetKey]; !ok {
+			defer session.Close()
+			_, ok, err := session.Store.GetSecretCiphertext(targetKey)
+			if err != nil {
+				return err
+			}
+			if !ok {
 				fmt.Printf(`⚠ "%s" is not stored.`+"\n", targetKey)
 				fmt.Println("no change")
 				return nil
@@ -265,7 +298,7 @@ func addSecretCommands(root *cobra.Command, configPath *string, yes *bool) {
 	wipeCmd.Flags().StringVarP(configPath, "config", "c", config.DefaultConfigPath, "Path to config.jsonc")
 	wipeCmd.Flags().BoolVar(yes, "yes", false, "Skip confirmation prompt")
 
-	secretCmd.AddCommand(listCmd, wipeCmd)
+	secretCmd.AddCommand(listCmd, historyCmd, wipeCmd)
 	root.AddCommand(secretCmd)
 }
 

@@ -51,15 +51,32 @@ import {
 import { runInit } from "./init.ts";
 import {
   changeMasterPassword,
+  dbPathForConfig,
   deleteDbPassword,
+  encId,
   getDbPassword,
   getS3SecretKey,
-  metadataPathForConfig,
   setDbPassword,
   setS3SecretKey,
   unlockSession,
   type Session,
 } from "./metadata.ts";
+import { recordDump, recordRestoreOp, recordSyncAudit } from "./record.ts";
+import {
+  Action,
+  getDumpByPath,
+  listAudit,
+  listDumps,
+  listRestoreHistory,
+  listSecretRotations,
+  listSecrets,
+  openVault,
+  recordAudit,
+  scanDumpsRoot,
+  sha256File,
+  Status,
+  vaultStatus,
+} from "./vault.ts";
 import {
   browseDumpFile,
   confirmOrYes,
@@ -97,11 +114,10 @@ type GlobalOpts = {
 
 async function unlockOrNull(config: Config, configPath: string): Promise<Session | null> {
   if (!needsMaster(config)) return null;
-  const metaPath = metadataPathForConfig(configPath);
   for (;;) {
     const master = await promptPassword("master password");
     try {
-      return await unlockSession(metaPath, master);
+      return await unlockSession(configPath, master);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       p.log.error(message);
@@ -306,13 +322,13 @@ async function handleChangeMaster(
   }
 
   const oldKey = session.aesKey!;
-  const encId = session.metadata.encId;
+  const prevEncId = encId(session);
   p.log.step("Re-encrypting saved database passwords…");
   const updated = await changeMasterPassword(session, next);
   p.log.success("Database passwords re-encrypted");
 
   const dumpsRoot = resolveDumpsRoot(config.dumpDirectory);
-  if (encId && (await hasEncryptedDumpsWithEncId(dumpsRoot, encId))) {
+  if (prevEncId && (await hasEncryptedDumpsWithEncId(dumpsRoot, prevEncId))) {
     const action = await p.select({
       message: "What should happen to existing dumps?",
       options: [
@@ -323,11 +339,11 @@ async function handleChangeMaster(
     if (p.isCancel(action)) onCancel();
 
     if (action === "delete") {
-      const n = await deleteEncryptedDumpsWithEncId(dumpsRoot, encId);
+      const n = await deleteEncryptedDumpsWithEncId(dumpsRoot, prevEncId);
       p.log.success(`Deleted ${n} encrypted dump(s)`);
     } else {
       await ensureDumpsRootWritable(dumpsRoot);
-      const n = await reencryptAllDumps(dumpsRoot, oldKey, updated.aesKey!, encId);
+      const n = await reencryptAllDumps(dumpsRoot, oldKey, updated.aesKey, prevEncId);
       p.log.success(`Re-encrypted ${n} dump file(s)`);
     }
   }
@@ -366,13 +382,14 @@ async function runMode(
     let finalPath = join(dir, plainName);
     if (config.encryptedDump) {
       if (!session?.aesKey) throw new Error("AES key required for encrypted dumps");
-      const encId = session.metadata.encId;
-      if (!encId) throw new Error("encId missing from metadata");
+      const eid = encId(session);
+      if (!eid) throw new Error("encId missing from vault");
       p.log.step("Encrypting dump…");
-      finalPath = await encryptDumpFile(finalPath, session.aesKey, encId);
+      finalPath = await encryptDumpFile(finalPath, session.aesKey, eid);
       p.log.success(`Encrypted (${formatBytes(Bun.file(finalPath).size)})`);
     }
 
+    await recordDump(session, dumpsRoot, finalPath, sourceItem.key);
     p.log.success(`Dump saved at ${finalPath}`);
     return;
   }
@@ -513,7 +530,8 @@ async function runMode(
     }
 
     try {
-      await runRestoreWithSpinner(image, destDb, restoreDir, restoreName, destItem.key, { clean });
+      const elapsed = await runRestoreWithSpinner(image, destDb, restoreDir, restoreName, destItem.key, { clean });
+      await recordRestoreOp(session, dumpsRoot, dumpPath, destItem.key, elapsed, clean, "", null);
     } finally {
       if (tempPlain) await rm(tempPlain, { force: true });
     }
@@ -569,17 +587,21 @@ async function runMode(
   await mkdir(dir, { recursive: true });
   const plainName = newDumpFileName(sourceItem.key);
   await runDumpWithSpinner(image, sourceDb, dir, plainName, sourceItem.key);
-  await runRestoreWithSpinner(image, destDb, dir, plainName, destItem.key, { clean });
+  const restoreElapsed = await runRestoreWithSpinner(image, destDb, dir, plainName, destItem.key, { clean });
 
   let finalPath = join(dir, plainName);
   if (config.encryptedDump) {
     if (!session?.aesKey) throw new Error("AES key required for encrypted dumps");
-    const encId = session.metadata.encId;
-    if (!encId) throw new Error("encId missing from metadata");
+    const eid = encId(session);
+    if (!eid) throw new Error("encId missing from vault");
     p.log.step("Encrypting dump…");
-    finalPath = await encryptDumpFile(finalPath, session.aesKey, encId);
+    finalPath = await encryptDumpFile(finalPath, session.aesKey, eid);
     p.log.success(`Encrypted (${formatBytes(Bun.file(finalPath).size)})`);
   }
+
+  await recordDump(session, dumpsRoot, finalPath, sourceItem.key);
+  recordSyncAudit(session, sourceItem.key, destItem.key, basename(finalPath), null);
+  await recordRestoreOp(session, dumpsRoot, join(dir, plainName), destItem.key, restoreElapsed, clean, "", null);
 
   p.log.info(`Dump kept at ${finalPath}`);
   p.log.success(`Synced ${sourceItem.key} → ${destItem.key}`);
@@ -730,8 +752,14 @@ addCommonOptions(
         "  doctor              Check Docker / dumps dir / metadata integrity",
         "  s3 upload           Upload a local dump to S3",
         "  s3 download         Browse and download a dump from S3",
-        "  secret list         List stored DB password keys (no values)",
+        "  secret list         List stored DB password keys with metadata",
+        "  secret history      Show rotation history for a secret key",
         "  secret wipe <key>   Remove a stored DB password by key",
+        "  vault status        Show SQLite vault summary",
+        "  audit list          List audit log entries",
+        "  dump-registry list  List indexed dumps with SHA-256",
+        "  dump-registry scan  Index existing dumps under dumps/",
+        "  restore-history list  List restore operations",
         "  config {init|validate|lint}",
       ].join("\n"),
     ),
@@ -839,13 +867,19 @@ secretCmd
       p.outro("nothing to list");
       return;
     }
-    const keys = Object.keys(session.metadata.dbPasswords).sort();
-    if (keys.length === 0) {
+    const secrets = listSecrets(session.db);
+    if (secrets.length === 0) {
       p.log.info("No saved DB passwords.");
     } else {
-      for (const k of keys) p.log.info(k);
+      for (const s of secrets) {
+        const last = s.lastUsedAt ? s.lastUsedAt.toISOString() : "-";
+        p.log.info(
+          `${s.key}\tcreated=${s.createdAt.toISOString()}\tupdated=${s.updatedAt.toISOString()}\tlast_used=${last}`,
+        );
+      }
     }
-    p.outro(`${keys.length} stored`);
+    session.db.close();
+    p.outro(`${secrets.length} stored`);
   });
 
 secretCmd
@@ -876,8 +910,10 @@ secretCmd
       p.outro("nothing to wipe");
       return;
     }
-    if (!(targetKey in session.metadata.dbPasswords)) {
+    const stored = listSecrets(session.db).some((s) => s.key === targetKey);
+    if (!stored) {
       p.log.warn(`"${targetKey}" is not stored.`);
+      session.db.close();
       p.outro("no change");
       return;
     }
@@ -889,6 +925,7 @@ secretCmd
       if (p.isCancel(ok)) onCancel();
       if (!ok) {
         p.log.warn("wipe cancelled");
+        session.db.close();
         p.outro("no change");
         return;
       }
@@ -901,6 +938,236 @@ secretCmd
       );
     } else {
       p.log.warn(`"${targetKey}" was already gone.`);
+    }
+    session.db.close();
+    p.outro("done");
+  });
+
+secretCmd
+  .command("history <key>")
+  .description("Show rotation history for a secret key")
+  .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
+  .action(async (opts: { config: string }, args: { key: string }) => {
+    const configPath = resolve(opts.config);
+    p.intro(`dumpmgr secret history ${args.key}`);
+    if (!(await configExists(configPath))) {
+      p.log.error(`Config file not found: ${configPath}`);
+      p.outro("config missing");
+      process.exit(1);
+    }
+    let config: Config;
+    try {
+      config = await loadConfigAsync(configPath);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      p.log.error(message);
+      p.outro("config invalid");
+      process.exit(1);
+    }
+    const session = await unlockForSecretOps(config, configPath);
+    if (!session) {
+      p.outro("no history");
+      return;
+    }
+    const rows = listSecretRotations(session.db, args.key, 50);
+    if (rows.length === 0) {
+      p.log.info(`No rotation history for "${args.key}".`);
+    } else {
+      for (const r of rows) {
+        p.log.info(`${r.rotatedAt.toISOString()}  ${r.action}  ${r.secretKey}`);
+      }
+    }
+    session.db.close();
+    p.outro("done");
+  });
+
+const vaultCmd = program.command("vault").description("Inspect the SQLite vault database");
+vaultCmd
+  .command("status")
+  .description("Show vault summary (counts, encId, path)")
+  .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
+  .action(async (opts: { config: string }) => {
+    const configPath = resolve(opts.config);
+    p.intro("dumpmgr vault status");
+    const db = await openVault(configPath);
+    try {
+      const st = vaultStatus(db, dbPathForConfig(configPath));
+      p.log.info(`path:          ${st.dbPath}`);
+      p.log.info(`schema:        v${st.schemaVersion}`);
+      p.log.info(`master:        ${st.hasMaster}`);
+      p.log.info(`encId:         ${st.encId}`);
+      p.log.info(`secrets:       ${st.secretCount}`);
+      p.log.info(`dumps indexed: ${st.dumpCount}`);
+      p.log.info(`audit entries: ${st.auditCount}`);
+      p.log.info(`restores:      ${st.restoreCount}`);
+    } finally {
+      db.close();
+    }
+    p.outro("done");
+  });
+
+const auditCmd = program.command("audit").description("View audit log entries");
+auditCmd
+  .command("list")
+  .description("List recent audit log entries")
+  .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
+  .option("--limit <n>", "Max entries", "50")
+  .option("--action <name>", "Filter by action")
+  .action(async (opts: { config: string; limit: string; action?: string }) => {
+    const configPath = resolve(opts.config);
+    p.intro("dumpmgr audit list");
+    const db = await openVault(configPath);
+    try {
+      const entries = listAudit(db, opts.action ?? "", Number(opts.limit) || 50);
+      if (entries.length === 0) {
+        p.log.info("No audit entries.");
+      } else {
+        for (const e of entries) {
+          p.log.info(
+            `${e.occurredAt.toISOString()}\t${e.action}\t${e.status}\t${e.subject}\t${e.destination}`,
+          );
+        }
+      }
+    } finally {
+      db.close();
+    }
+    p.outro("done");
+  });
+
+const dumpRegistryCmd = program
+  .command("dump-registry")
+  .description("Inspect indexed dump file metadata");
+
+dumpRegistryCmd
+  .command("list")
+  .description("List indexed dumps with SHA-256 checksums")
+  .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
+  .option("--limit <n>", "Max entries", "100")
+  .option("--item <key>", "Filter by database item key")
+  .action(async (opts: { config: string; limit: string; item?: string }) => {
+    const configPath = resolve(opts.config);
+    const db = await openVault(configPath);
+    try {
+      const records = listDumps(db, opts.item ?? "", Number(opts.limit) || 100);
+      if (records.length === 0) {
+        p.log.info("No indexed dumps. Run `dumpmgr dump-registry scan` to index existing files.");
+      } else {
+        for (const d of records) {
+          p.log.info(
+            `${d.relativePath}\t${d.itemKey}\t${d.sha256}\t${d.sizeBytes}\t${d.encrypted}\t${d.createdAt.toISOString()}`,
+          );
+        }
+      }
+    } finally {
+      db.close();
+    }
+    p.outro("done");
+  });
+
+dumpRegistryCmd
+  .command("show <relative-path>")
+  .description("Show metadata for one indexed dump")
+  .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
+  .action(async (opts: { config: string }, args: { relativePath: string }) => {
+    const configPath = resolve(opts.config);
+    const db = await openVault(configPath);
+    try {
+      const rec = getDumpByPath(db, args.relativePath);
+      if (!rec) {
+        p.log.warn(`Dump not indexed: ${args.relativePath}`);
+      } else {
+        p.log.info(`path:      ${rec.relativePath}`);
+        p.log.info(`item:      ${rec.itemKey}`);
+        p.log.info(`sha256:    ${rec.sha256}`);
+        p.log.info(`size:      ${rec.sizeBytes} bytes`);
+        p.log.info(`encrypted: ${rec.encrypted}`);
+        p.log.info(`encId:     ${rec.encId}`);
+        p.log.info(`created:   ${rec.createdAt.toISOString()}`);
+      }
+    } finally {
+      db.close();
+    }
+    p.outro("done");
+  });
+
+dumpRegistryCmd
+  .command("verify <relative-path>")
+  .description("Verify on-disk SHA-256 matches the vault record")
+  .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
+  .action(async (opts: { config: string }, args: { relativePath: string }) => {
+    const configPath = resolve(opts.config);
+    const config = await loadConfigAsync(configPath);
+    const dumpsRoot = resolveDumpsRoot(config.dumpDirectory);
+    const db = await openVault(configPath);
+    try {
+      const rec = getDumpByPath(db, args.relativePath);
+      if (!rec) throw new Error(`dump not indexed: ${args.relativePath}`);
+      const full = join(dumpsRoot, args.relativePath);
+      const { hash, size } = await sha256File(full);
+      if (hash !== rec.sha256 || size !== rec.sizeBytes) {
+        recordAudit(
+          db,
+          Action.DumpVerify,
+          Status.Failure,
+          args.relativePath,
+          "",
+          `want=${rec.sha256} got=${hash}`,
+          "checksum mismatch",
+        );
+        throw new Error(`checksum mismatch for ${args.relativePath}`);
+      }
+      recordAudit(db, Action.DumpVerify, Status.Success, args.relativePath, "", "checksum ok", "");
+      p.log.success(`${args.relativePath} checksum OK (${hash})`);
+    } finally {
+      db.close();
+    }
+    p.outro("done");
+  });
+
+dumpRegistryCmd
+  .command("scan")
+  .description("Index existing dump files under dumps/ (computes SHA-256)")
+  .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
+  .action(async (opts: { config: string }) => {
+    const configPath = resolve(opts.config);
+    const config = await loadConfigAsync(configPath);
+    const dumpsRoot = resolveDumpsRoot(config.dumpDirectory);
+    const db = await openVault(configPath);
+    try {
+      const n = await scanDumpsRoot(db, dumpsRoot);
+      recordAudit(db, Action.DumpScan, Status.Success, dumpsRoot, "", `indexed=${n}`, "");
+      p.log.success(`Indexed ${n} dump file(s)`);
+    } finally {
+      db.close();
+    }
+    p.outro("done");
+  });
+
+const restoreHistoryCmd = program
+  .command("restore-history")
+  .description("View restore history from the vault");
+restoreHistoryCmd
+  .command("list")
+  .description("List recent restore operations")
+  .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
+  .option("--limit <n>", "Max entries", "50")
+  .option("--destination <key>", "Filter by destination key")
+  .action(async (opts: { config: string; limit: string; destination?: string }) => {
+    const configPath = resolve(opts.config);
+    const db = await openVault(configPath);
+    try {
+      const rows = listRestoreHistory(db, opts.destination ?? "", Number(opts.limit) || 50);
+      if (rows.length === 0) {
+        p.log.info("No restore history.");
+      } else {
+        for (const r of rows) {
+          p.log.info(
+            `${r.restoredAt.toISOString()}\t${r.status}\t${r.dumpRelativePath}\t${r.destinationKey}\t${r.durationMs}\t${r.dumpSha256}`,
+          );
+        }
+      }
+    } finally {
+      db.close();
     }
     p.outro("done");
   });

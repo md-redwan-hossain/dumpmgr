@@ -294,9 +294,9 @@ func handleChangeMaster(cfg *config.Config, session *metadata.Session) (*metadat
 	}
 
 	oldKey := session.AESKey
-	encID := ""
-	if session.Metadata.EncID != nil {
-		encID = *session.Metadata.EncID
+	encID, err := metadata.EncID(session)
+	if err != nil {
+		return nil, err
 	}
 	fmt.Println("→ Re-encrypting saved database passwords…")
 	updated, err := metadata.ChangeMasterPassword(session, next)
@@ -388,11 +388,12 @@ func runDump(opts Options, cfg *config.Config, session *metadata.Session, items 
 		if session == nil || session.AESKey == nil {
 			return fmt.Errorf("AES key required for encrypted dumps")
 		}
-		if session.Metadata.EncID == nil || *session.Metadata.EncID == "" {
-			return fmt.Errorf("encId missing from metadata")
+		encID, err := metadata.EncID(session)
+		if err != nil || encID == "" {
+			return fmt.Errorf("encId missing from vault")
 		}
 		fmt.Println("→ Encrypting dump…")
-		finalPath, err = dumps.EncryptDumpFile(dumpPath, session.AESKey, *session.Metadata.EncID)
+		finalPath, err = dumps.EncryptDumpFile(dumpPath, session.AESKey, encID)
 		if err != nil {
 			return err
 		}
@@ -400,7 +401,7 @@ func runDump(opts Options, cfg *config.Config, session *metadata.Session, items 
 		fmt.Printf("✓ Encrypted (%s)\n", dumps.FormatBytes(size))
 	}
 	fmt.Printf("✓ Dump saved at %s\n", finalPath)
-	return nil
+	return recordDump(session, dumpsRoot, finalPath, sourceItem.Key)
 }
 
 func runRestore(opts Options, cfg *config.Config, session *metadata.Session, image, dumpsRoot string) error {
@@ -570,10 +571,13 @@ func runRestore(opts Options, cfg *config.Config, session *metadata.Session, ima
 		}
 	}()
 
-	if _, _, err := runRestoreWithSpinner(image, destDB, restoreDir, restoreName, destItem.Key, clean); err != nil {
-		return err
+	elapsed, warnings, restoreErr := runRestoreWithSpinner(image, destDB, restoreDir, restoreName, destItem.Key, clean)
+	if restoreErr != nil {
+		recordRestore(session, dumpsRoot, dumpPath, destItem.Key, int64(elapsed), clean, warnings, restoreErr)
+		return restoreErr
 	}
 	fmt.Printf("✓ Restored %s → %s\n", fileName, destItem.Key)
+	recordRestore(session, dumpsRoot, dumpPath, destItem.Key, int64(elapsed), clean, warnings, nil)
 	return nil
 }
 
@@ -641,12 +645,12 @@ func runDumpRestore(opts Options, cfg *config.Config, session *metadata.Session,
 		if session == nil || session.AESKey == nil {
 			return fmt.Errorf("AES key required for encrypted dumps")
 		}
-		if session.Metadata.EncID == nil || *session.Metadata.EncID == "" {
-			return fmt.Errorf("encId missing from metadata")
+		encID, err := metadata.EncID(session)
+		if err != nil || encID == "" {
+			return fmt.Errorf("encId missing from vault")
 		}
 		fmt.Println("→ Encrypting dump…")
-		var err error
-		finalPath, err = dumps.EncryptDumpFile(finalPath, session.AESKey, *session.Metadata.EncID)
+		finalPath, err = dumps.EncryptDumpFile(finalPath, session.AESKey, encID)
 		if err != nil {
 			return err
 		}
@@ -655,6 +659,10 @@ func runDumpRestore(opts Options, cfg *config.Config, session *metadata.Session,
 	}
 	fmt.Printf("ℹ Dump kept at %s\n", finalPath)
 	fmt.Printf("✓ Synced %s → %s\n", sourceItem.Key, destItem.Key)
+	if err := recordDump(session, dumpsRoot, finalPath, sourceItem.Key); err != nil {
+		return err
+	}
+	recordSyncAudit(session, sourceItem.Key, destItem.Key, filepath.Base(finalPath), nil)
 	return nil
 }
 
@@ -751,19 +759,19 @@ func UnlockForSecretOps(cfg *config.Config, configPath string) (*metadata.Sessio
 	return UnlockOrNull(cfg, configPath)
 }
 
-func SortedSecretKeys(session *metadata.Session) []string {
-	keys := make([]string, 0, len(session.Metadata.DBPasswords))
-	for k := range session.Metadata.DBPasswords {
-		keys = append(keys, k)
+func SortedSecretKeys(session *metadata.Session) ([]string, error) {
+	if session == nil || session.Store == nil {
+		return nil, nil
 	}
-	for i := 0; i < len(keys); i++ {
-		for j := i + 1; j < len(keys); j++ {
-			if keys[j] < keys[i] {
-				keys[i], keys[j] = keys[j], keys[i]
-			}
-		}
+	infos, err := session.Store.ListSecrets()
+	if err != nil {
+		return nil, err
 	}
-	return keys
+	keys := make([]string, len(infos))
+	for i, info := range infos {
+		keys[i] = info.Key
+	}
+	return keys, nil
 }
 
 func WarnEncryptedDumpConfig() string {

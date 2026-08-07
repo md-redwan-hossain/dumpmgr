@@ -9,6 +9,7 @@ import (
 	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/docker"
 	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/dumps"
 	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/metadata"
+	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/vault"
 )
 
 type Check struct {
@@ -60,9 +61,9 @@ func Run(cfg *config.Config, configPath string) Report {
 		})
 	}
 
-	metaPath := metadata.PathForConfig(configPath)
-	magic := checkMetadataMagic(metaPath)
-	checks = append(checks, Check{Name: "metadata-magic", OK: magic.OK, Message: magic.Message, Hint: magic.Hint})
+	vaultPath := metadata.DBPathForConfig(configPath)
+	vaultCheck := checkVault(vaultPath)
+	checks = append(checks, Check{Name: "vault-db", OK: vaultCheck.OK, Message: vaultCheck.Message, Hint: vaultCheck.Hint})
 
 	if cfg.S3Options != nil {
 		checks = append(checks, Check{
@@ -73,25 +74,28 @@ func Run(cfg *config.Config, configPath string) Report {
 		})
 	}
 
-	if magic.OK {
-		meta, err := metadata.Load(metaPath)
+	if vaultCheck.OK {
+		store, err := vault.Open(configPath)
 		if err != nil {
 			checks = append(checks, Check{
-				Name:    "metadata-body",
+				Name:    "vault-body",
 				OK:      false,
-				Message: fmt.Sprintf("cannot decode metadata body: %v", err),
+				Message: fmt.Sprintf("cannot open vault: %v", err),
 			})
 		} else {
+			defer store.Close()
 			if config.NeedsMaster(cfg) {
-				checks = append(checks, saltCheck(meta.KdfSalt != nil))
-				checks = append(checks, masterHashCheck(meta.MasterPassword != nil))
+				hasMaster, _ := store.HasMaster()
+				checks = append(checks, masterHashCheck(hasMaster))
+				checks = append(checks, saltCheck(hasMaster))
 			}
 			if cfg.EncryptedDump {
-				if meta.EncID != nil && *meta.EncID != "" {
+				encID, _ := store.EncID()
+				if encID != "" {
 					checks = append(checks, Check{
 						Name:    "enc-id",
 						OK:      true,
-						Message: fmt.Sprintf("encId present (%s)", *meta.EncID),
+						Message: fmt.Sprintf("encId present (%s)", encID),
 					})
 				} else {
 					checks = append(checks, Check{
@@ -127,50 +131,23 @@ func probeParentDir(parent string) error {
 	return nil
 }
 
-type magicResult struct {
+type vaultResult struct {
 	OK      bool
 	Message string
 	Hint    string
 }
 
-func checkMetadataMagic(metaPath string) magicResult {
-	data, err := os.ReadFile(metaPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return magicResult{
-				OK:      false,
-				Message: fmt.Sprintf("metadata file not found at %s", metaPath),
-				Hint:    "run `dumpmgr config init`",
-			}
-		}
-		return magicResult{OK: false, Message: fmt.Sprintf("cannot read metadata at %s", metaPath)}
-	}
-	magic := metadata.Magic()
-	if len(data) < len(magic)+1 {
-		return magicResult{
+func checkVault(vaultPath string) vaultResult {
+	if _, err := os.Stat(vaultPath); os.IsNotExist(err) {
+		return vaultResult{
 			OK:      false,
-			Message: "metadata file is too short",
-			Hint:    "run `dumpmgr config init` to recreate",
+			Message: fmt.Sprintf("vault database not found at %s", vaultPath),
+			Hint:    "run `dumpmgr config init`",
 		}
+	} else if err != nil {
+		return vaultResult{OK: false, Message: fmt.Sprintf("cannot read vault at %s", vaultPath)}
 	}
-	for i := range magic {
-		if data[i] != magic[i] {
-			return magicResult{
-				OK:      false,
-				Message: "metadata has bad magic (not a DBSM file)",
-				Hint:    "delete the file and run `dumpmgr config init`",
-			}
-		}
-	}
-	version := data[len(magic)]
-	if version != metadata.Version {
-		return magicResult{
-			OK:      false,
-			Message: fmt.Sprintf("unsupported metadata version: %d", version),
-			Hint:    fmt.Sprintf("expected version %d", metadata.Version),
-		}
-	}
-	return magicResult{OK: true, Message: fmt.Sprintf("metadata magic OK (DBSM v%d)", version)}
+	return vaultResult{OK: true, Message: fmt.Sprintf("vault database OK (%s)", vaultPath)}
 }
 
 func saltCheck(ok bool) Check {
