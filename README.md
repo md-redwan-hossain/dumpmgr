@@ -22,11 +22,15 @@ Requires Docker. Prefer official Debian-based images (e.g. `postgres:18`). Avoid
 
 ```bash
 bun run test:unit         # unit tests; no Docker required
+bun run test:integration  # end-to-end tests; requires Docker + postgres:18
+bun run test:all          # unit + integration
 bun run typecheck
 ```
 
 Unit tests use isolated temporary directories and do not modify the project config
-or metadata files.
+or metadata files. Integration tests start an ephemeral `postgres:18` container,
+run real `pg_dump` / `pg_restore` flows, and are skipped automatically when Docker
+is unavailable.
 
 ## Commands / flags
 
