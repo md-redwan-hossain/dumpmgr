@@ -53,12 +53,34 @@ export const S3OptionsSchema = z
 
 export type S3Options = z.infer<typeof S3OptionsSchema>;
 
+export const AutonomousScheduleSchema = z
+  .object({
+    /** Cron expression (e.g. "0 2 * * *" for daily at 02:00). */
+    cron: z.string().min(1),
+    /** Item keys to dump; omit or empty to dump all configured items. */
+    items: z.array(z.string().min(1)).optional(),
+    /** Upload each dump to S3 after creation (requires s3Options). */
+    uploadToS3: z.boolean().default(false),
+  })
+  .strict();
+
+export type AutonomousSchedule = z.infer<typeof AutonomousScheduleSchema>;
+
+export const AutonomousOptionsSchema = z
+  .object({
+    schedules: z.array(AutonomousScheduleSchema).min(1),
+  })
+  .strict();
+
+export type AutonomousOptions = z.infer<typeof AutonomousOptionsSchema>;
+
 export const ConfigSchema = z.object({
   rememberPassword: z.boolean().default(true),
   encryptedDump: z.boolean().default(false),
   dumpDirectory: z.string().default("."),
   image: z.string().min(1).optional(),
   s3Options: S3OptionsSchema.optional(),
+  autonomous: AutonomousOptionsSchema.optional(),
   items: z.record(z.string(), DatabaseEntrySchema).default({}),
 });
 
@@ -308,6 +330,7 @@ export async function validateConfigFile(
     `encryptedDump: ${config.encryptedDump}`,
     `dumpDirectory: ${config.dumpDirectory}`,
     `s3Options: ${config.s3Options ? `${config.s3Options.endpoint}/${config.s3Options.bucketName}` : "disabled"}`,
+    `autonomous: ${config.autonomous ? `${config.autonomous.schedules.length} schedule(s)` : "disabled"}`,
     "",
     `image=${image}  parents=${entries.length}  nested=${nestedCount}`,
   ];

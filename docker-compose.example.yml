@@ -1,0 +1,12 @@
+# Example compose overlay — copy useful bits into docker-compose.yml as needed.
+
+services:
+  dumpmgr:
+  # When Postgres runs in another compose stack, join that network instead of host:
+  #   DUMPMGR_DOCKER_NETWORK: your_postgres_network
+  # networks:
+  #   - your_postgres_network
+
+# networks:
+#   your_postgres_network:
+#     external: true
