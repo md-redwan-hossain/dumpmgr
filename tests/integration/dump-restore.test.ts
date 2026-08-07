@@ -111,7 +111,7 @@ describeIntegration("integration: dump and restore", () => {
           false,
           ["encrypt", "decrypt"],
         );
-        const encPath = await encryptDumpFile(plainPath, key, "ITEST01");
+        const encPath = await encryptDumpFile(plainPath, key, "A1B2C3D4");
         expect(isEncryptedDumpName(encPath.split("/").pop()!)).toBe(true);
 
         const tempPlain = join(workdir, "decrypted.dump");
