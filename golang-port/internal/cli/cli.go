@@ -41,7 +41,7 @@ Auxiliary commands:
   restore-history list  List restore operations
   config {init|validate|lint}`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return handleMain(configPath, yes, debug, "")
+			return handleMain(configPath, yes, debug, "", "", "", "")
 		},
 	}
 	root.Flags().StringVarP(&configPath, "config", "c", config.DefaultConfigPath, "Path to config.jsonc")
@@ -69,26 +69,40 @@ func addModeCommands(root *cobra.Command, configPath *string, yes, debug *bool) 
 		{"dump-restore", app.ModeDumpRestore, "Take dump and restore (copy source → destination)"},
 	}
 	for _, m := range modes {
+		m := m
+		var source, dest, dump string
 		cmd := &cobra.Command{
 			Use:   m.name,
 			Short: m.desc,
 			RunE: func(cmd *cobra.Command, args []string) error {
-				return handleMain(*configPath, *yes, *debug, m.mode)
+				return handleMain(*configPath, *yes, *debug, m.mode, source, dest, dump)
 			},
 		}
 		cmd.Flags().StringVarP(configPath, "config", "c", config.DefaultConfigPath, "Path to config.jsonc")
 		cmd.Flags().BoolVar(yes, "yes", false, "Skip confirms; auto-create missing dest DB")
 		cmd.Flags().BoolVar(debug, "debug", false, "Print docker/DB commands being executed")
+		if m.mode == app.ModeDump || m.mode == app.ModeDumpRestore {
+			cmd.Flags().StringVar(&source, "source", "", "Database item key to dump (skip picker)")
+		}
+		if m.mode == app.ModeRestore || m.mode == app.ModeDumpRestore {
+			cmd.Flags().StringVar(&dest, "dest", "", "Destination database item key (skip picker)")
+		}
+		if m.mode == app.ModeRestore {
+			cmd.Flags().StringVar(&dump, "dump", "", "Path to dump file (skip browser)")
+		}
 		root.AddCommand(cmd)
 	}
 }
 
-func handleMain(configPath string, yes, debug bool, mode app.Mode) error {
+func handleMain(configPath string, yes, debug bool, mode app.Mode, source, dest, dump string) error {
 	opts := app.Options{
 		ConfigPath: configPath,
 		Yes:        yes,
 		Debug:      debug,
 		Mode:       mode,
+		Source:     source,
+		Dest:       dest,
+		Dump:       dump,
 	}
 	if err := app.RunMain(opts); err != nil {
 		fmt.Printf("✗ %v\n", err)

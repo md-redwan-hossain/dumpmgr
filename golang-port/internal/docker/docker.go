@@ -118,10 +118,25 @@ func runDocker(args []string, quiet bool) (int, string, string, error) {
 	return exitCode, stdout.String(), stderr.String(), nil
 }
 
-func pgBaseArgs(image, password, volume string) []string {
+func needsHostGateway(host string) bool {
+	return runtime.GOOS == "linux" && DockerHost(host) == "host.docker.internal"
+}
+
+// DockerRunHostArgs returns extra docker run flags for Linux loopback hosts.
+func DockerRunHostArgs(host string) []string {
+	if needsHostGateway(host) {
+		return []string{"--add-host", "host.docker.internal:host-gateway"}
+	}
+	return nil
+}
+
+func pgBaseArgs(image, password, volume, dbHost string) []string {
 	args := []string{"run", "--rm", "-e", "PGPASSWORD=" + password}
 	if network := os.Getenv("DUMPMGR_DOCKER_NETWORK"); network != "" {
 		args = append(args, "--network", network)
+	}
+	if dbHost != "" {
+		args = append(args, DockerRunHostArgs(dbHost)...)
 	}
 	if volume != "" {
 		args = append(args, "-v", volume)
@@ -139,7 +154,7 @@ func VerifyConnection(image, role, label string, db ResolvedDB, database string)
 		database = db.Database
 	}
 	host := DockerHost(db.Host)
-	args := append(pgBaseArgs(image, db.Password, ""),
+	args := append(pgBaseArgs(image, db.Password, "", db.Host),
 		"psql",
 		"--host", host,
 		"--port", fmt.Sprintf("%d", db.Port),
@@ -165,7 +180,7 @@ func DatabaseExists(image string, db ResolvedDB, connectDatabase string) (bool, 
 	host := DockerHost(db.Host)
 	esc := strings.ReplaceAll(db.Database, "'", "''")
 	sql := fmt.Sprintf("SELECT 1 FROM pg_database WHERE datname='%s'", esc)
-	args := append(pgBaseArgs(image, db.Password, ""),
+	args := append(pgBaseArgs(image, db.Password, "", db.Host),
 		"psql",
 		"--host", host,
 		"--port", fmt.Sprintf("%d", db.Port),
@@ -190,7 +205,7 @@ func CreateDatabase(image string, db ResolvedDB, connectDatabase string) error {
 	}
 	host := DockerHost(db.Host)
 	sql := fmt.Sprintf("CREATE DATABASE %s", quoteIdent(db.Database))
-	args := append(pgBaseArgs(image, db.Password, ""),
+	args := append(pgBaseArgs(image, db.Password, "", db.Host),
 		"psql",
 		"--host", host,
 		"--port", fmt.Sprintf("%d", db.Port),
@@ -220,7 +235,7 @@ func DropDatabase(image string, db ResolvedDB, connectDatabase string) error {
 		fmt.Sprintf("DROP DATABASE IF EXISTS %s", quoteIdent(db.Database)),
 	}
 	for _, sql := range statements {
-		args := append(pgBaseArgs(image, db.Password, ""),
+		args := append(pgBaseArgs(image, db.Password, "", db.Host),
 			"psql",
 			"--host", host,
 			"--port", fmt.Sprintf("%d", db.Port),
@@ -272,7 +287,7 @@ func EnsureDatabaseLogin(image string, parentDB ResolvedDB, opts EnsureLoginOpts
 		{grantSchema, opts.Database},
 	}
 	for _, step := range steps {
-		args := append(pgBaseArgs(image, parentDB.Password, ""),
+		args := append(pgBaseArgs(image, parentDB.Password, "", parentDB.Host),
 			"psql",
 			"--host", host,
 			"--port", fmt.Sprintf("%d", parentDB.Port),
@@ -300,7 +315,7 @@ func DumpDatabase(image string, db ResolvedDB, workdir, dumpFileName string) err
 	volume := absWorkdir + ":/backup"
 	host := DockerHost(db.Host)
 	out := "/backup/" + dumpFileName
-	args := append(pgBaseArgs(image, db.Password, volume),
+	args := append(pgBaseArgs(image, db.Password, volume, db.Host),
 		"pg_dump",
 		fmt.Sprintf("--host=%s", host),
 		fmt.Sprintf("--port=%d", db.Port),
@@ -338,7 +353,7 @@ func RestoreDatabase(image string, db ResolvedDB, workdir, dumpFileName string, 
 	volume := absWorkdir + ":/backup"
 	host := DockerHost(db.Host)
 	input := "/backup/" + dumpFileName
-	args := append(pgBaseArgs(image, db.Password, volume),
+	args := append(pgBaseArgs(image, db.Password, volume, db.Host),
 		"pg_restore",
 		fmt.Sprintf("--host=%s", host),
 		fmt.Sprintf("--port=%d", db.Port),

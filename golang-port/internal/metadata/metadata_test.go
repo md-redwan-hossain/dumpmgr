@@ -101,6 +101,57 @@ func TestEmptyVaultAndLegacyMigration(t *testing.T) {
 	}
 }
 
+func TestChangeMasterReencryptsS3Secret(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.jsonc")
+	if err := os.WriteFile(configPath, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session, err := metadata.CreateWithMaster(configPath, "old-master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.SetDBPassword(session, "postgres:prod", "db-secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.SetS3SecretKey(session, "s3-secret"); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, oldS3, err := session.Store.VaultMeta()
+	if err != nil || !oldS3.Valid {
+		t.Fatal("expected s3 ciphertext in vault")
+	}
+	oldCipher := oldS3.String
+
+	updated, err := metadata.ChangeMasterPassword(session, "new-master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated.Close()
+
+	reloaded, err := metadata.Unlock(configPath, "new-master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reloaded.Close()
+
+	pw, err := metadata.GetDBPassword(reloaded, "postgres:prod")
+	if err != nil || pw != "db-secret" {
+		t.Fatalf("db password: %q %v", pw, err)
+	}
+	sk, err := metadata.GetS3SecretKey(reloaded)
+	if err != nil || sk != "s3-secret" {
+		t.Fatalf("s3 secret: %q %v", sk, err)
+	}
+	_, _, _, newS3, err := reloaded.Store.VaultMeta()
+	if err != nil || !newS3.Valid {
+		t.Fatal("expected reloaded s3 ciphertext")
+	}
+	if newS3.String == oldCipher {
+		t.Fatal("expected S3 ciphertext to change after master rotation")
+	}
+}
+
 func TestCreateWithMasterRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.jsonc")

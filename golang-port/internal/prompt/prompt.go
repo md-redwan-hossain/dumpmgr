@@ -155,6 +155,37 @@ func SelectDatabaseTree(cfg *config.Config, message, exclude string) (config.Dat
 	return selected.DatabaseItem, nil
 }
 
+// ResolveDatabaseItem returns the item for key when set, otherwise prompts interactively.
+func ResolveDatabaseItem(items []config.DatabaseItem, key, message, exclude string) (config.DatabaseItem, error) {
+	if key != "" {
+		if key == exclude {
+			return config.DatabaseItem{}, fmt.Errorf(`cannot use %q as source/destination`, key)
+		}
+		for _, item := range items {
+			if item.Key == key {
+				return item, nil
+			}
+		}
+		return config.DatabaseItem{}, fmt.Errorf(`unknown database %q. Check config.jsonc items`, key)
+	}
+	return SelectDatabaseItem(items, message, exclude)
+}
+
+// ResolveDatabaseTree returns the restore-tree item for key when set, otherwise prompts interactively.
+func ResolveDatabaseTree(cfg *config.Config, key, message, exclude string) (config.DatabaseItem, error) {
+	if key != "" {
+		if key == exclude {
+			return config.DatabaseItem{}, fmt.Errorf(`cannot use %q as source/destination`, key)
+		}
+		item := config.FindRestoreDestination(cfg, key)
+		if item == nil {
+			return config.DatabaseItem{}, fmt.Errorf(`unknown database %q. Check config.jsonc items`, key)
+		}
+		return *item, nil
+	}
+	return SelectDatabaseTree(cfg, message, exclude)
+}
+
 func Password(message string) (string, error) {
 	labeled := message
 	if !strings.HasPrefix(message, "Enter ") {
