@@ -3,13 +3,11 @@ package vault
 import (
 	"bytes"
 	"compress/gzip"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 )
@@ -119,23 +117,6 @@ func migrateLegacyIfNeeded(configPath, vaultPath string) error {
 	return nil
 }
 
-func openVaultDB(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
-	if err != nil {
-		return nil, err
-	}
-	if err := db.Ping(); err != nil {
-		db.Close()
-		return nil, err
-	}
-	s := &Store{db: db, path: path}
-	if err := s.migrate(); err != nil {
-		db.Close()
-		return nil, err
-	}
-	return s, nil
-}
-
 func NewEncID() string {
 	return strings.ToUpper(strings.ReplaceAll(uuid.New().String(), "-", ""))
 }
@@ -146,12 +127,3 @@ func LegacyPathForConfig(configPath string) string {
 }
 
 func LegacyMagic() []byte { return legacyMagic }
-
-func (s *Store) CreatedAt() (time.Time, error) {
-	var created string
-	err := s.db.QueryRow(`SELECT created_at FROM vault_meta WHERE id = 1`).Scan(&created)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return parseTime(created), nil
-}

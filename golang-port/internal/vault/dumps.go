@@ -2,179 +2,139 @@ package vault
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
 	"strings"
 
 	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/dumps"
+	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/vault/sqlcgen"
 )
 
 func (s *Store) RegisterDump(relativePath, itemKey, fileName, sha256 string, size int64, encrypted bool, encID string) (int64, error) {
-	now := s.now()
-	enc := 0
+	enc := int64(0)
 	if encrypted {
 		enc = 1
 	}
-	res, err := s.db.Exec(`
-		INSERT INTO dump_files (relative_path, item_key, file_name, sha256, size_bytes, encrypted, enc_id, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(relative_path) DO UPDATE SET
-			sha256 = excluded.sha256,
-			size_bytes = excluded.size_bytes,
-			encrypted = excluded.encrypted,
-			enc_id = excluded.enc_id`,
-		relativePath, itemKey, fileName, sha256, size, enc, encID, now)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
+	err := s.queries.UpsertDumpFile(s.ctx(), sqlcgen.UpsertDumpFileParams{
+		RelativePath: relativePath,
+		ItemKey:      itemKey,
+		FileName:     fileName,
+		Sha256:       sha256,
+		SizeBytes:    size,
+		Encrypted:    enc,
+		EncID:        encID,
+		CreatedAt:    s.now(),
+	})
+	return 0, err
 }
 
 func (s *Store) GetDumpByPath(relativePath string) (*DumpRecord, error) {
-	var d DumpRecord
-	var enc int
-	var created string
-	err := s.db.QueryRow(`
-		SELECT id, relative_path, item_key, file_name, sha256, size_bytes, encrypted, enc_id, created_at
-		FROM dump_files WHERE relative_path = ?`, relativePath).
-		Scan(&d.ID, &d.RelativePath, &d.ItemKey, &d.FileName, &d.SHA256, &d.SizeBytes, &enc, &d.EncID, &created)
-	if err == sql.ErrNoRows {
+	row, err := s.queries.GetDumpByPath(s.ctx(), relativePath)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	d.Encrypted = enc == 1
-	d.CreatedAt = parseTime(created)
-	return &d, nil
+	rec := dumpRecordFromRow(row)
+	return &rec, nil
 }
 
 func (s *Store) ListDumps(itemKey string, limit int) ([]DumpRecord, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	var rows *sql.Rows
+	var rows []sqlcgen.DumpFile
 	var err error
 	if itemKey != "" {
-		rows, err = s.db.Query(`
-			SELECT id, relative_path, item_key, file_name, sha256, size_bytes, encrypted, enc_id, created_at
-			FROM dump_files WHERE item_key = ? ORDER BY created_at DESC LIMIT ?`, itemKey, limit)
+		rows, err = s.queries.ListDumpsByItemKey(s.ctx(), sqlcgen.ListDumpsByItemKeyParams{
+			ItemKey: itemKey,
+			Limit:   int64(limit),
+		})
 	} else {
-		rows, err = s.db.Query(`
-			SELECT id, relative_path, item_key, file_name, sha256, size_bytes, encrypted, enc_id, created_at
-			FROM dump_files ORDER BY created_at DESC LIMIT ?`, limit)
+		rows, err = s.queries.ListDumps(s.ctx(), int64(limit))
 	}
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return scanDumpRows(rows)
-}
-
-func scanDumpRows(rows *sql.Rows) ([]DumpRecord, error) {
-	var out []DumpRecord
-	for rows.Next() {
-		var d DumpRecord
-		var enc int
-		var created string
-		if err := rows.Scan(&d.ID, &d.RelativePath, &d.ItemKey, &d.FileName, &d.SHA256, &d.SizeBytes, &enc, &d.EncID, &created); err != nil {
-			return nil, err
-		}
-		d.Encrypted = enc == 1
-		d.CreatedAt = parseTime(created)
-		out = append(out, d)
+	out := make([]DumpRecord, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, dumpRecordFromRow(row))
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Store) RecordRestore(rec RestoreRecord) error {
-	clean := 0
+	clean := int64(0)
 	if rec.CleanRestore {
 		clean = 1
 	}
-	_, err := s.db.Exec(`
-		INSERT INTO restore_history (
-			dump_id, dump_relative_path, dump_sha256, destination_key, restored_at,
-			duration_ms, status, clean_restore, warnings, error_message
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		rec.DumpID, rec.DumpRelativePath, rec.DumpSHA256, rec.DestinationKey, s.now(),
-		rec.DurationMS, rec.Status, clean, rec.Warnings, rec.ErrorMessage)
-	return err
+	var dumpID sql.NullInt64
+	if rec.DumpID != nil {
+		dumpID = sql.NullInt64{Int64: *rec.DumpID, Valid: true}
+	}
+	return s.queries.InsertRestoreHistory(s.ctx(), sqlcgen.InsertRestoreHistoryParams{
+		DumpID:           dumpID,
+		DumpRelativePath: rec.DumpRelativePath,
+		DumpSha256:       rec.DumpSHA256,
+		DestinationKey:   rec.DestinationKey,
+		RestoredAt:       s.now(),
+		DurationMs:       rec.DurationMS,
+		Status:           rec.Status,
+		CleanRestore:     clean,
+		Warnings:         rec.Warnings,
+		ErrorMessage:     rec.ErrorMessage,
+	})
 }
 
 func (s *Store) ListRestoreHistory(destinationKey string, limit int) ([]RestoreRecord, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	var rows *sql.Rows
+	var rows []sqlcgen.RestoreHistory
 	var err error
 	if destinationKey != "" {
-		rows, err = s.db.Query(`
-			SELECT id, dump_id, dump_relative_path, dump_sha256, destination_key, restored_at,
-				duration_ms, status, clean_restore, warnings, error_message
-			FROM restore_history WHERE destination_key = ? ORDER BY restored_at DESC LIMIT ?`, destinationKey, limit)
+		rows, err = s.queries.ListRestoreHistoryByDestination(s.ctx(), sqlcgen.ListRestoreHistoryByDestinationParams{
+			DestinationKey: destinationKey,
+			Limit:          int64(limit),
+		})
 	} else {
-		rows, err = s.db.Query(`
-			SELECT id, dump_id, dump_relative_path, dump_sha256, destination_key, restored_at,
-				duration_ms, status, clean_restore, warnings, error_message
-			FROM restore_history ORDER BY restored_at DESC LIMIT ?`, limit)
+		rows, err = s.queries.ListRestoreHistory(s.ctx(), int64(limit))
 	}
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []RestoreRecord
-	for rows.Next() {
-		var r RestoreRecord
-		var dumpID sql.NullInt64
-		var restored string
-		var clean int
-		if err := rows.Scan(&r.ID, &dumpID, &r.DumpRelativePath, &r.DumpSHA256, &r.DestinationKey, &restored,
-			&r.DurationMS, &r.Status, &clean, &r.Warnings, &r.ErrorMessage); err != nil {
-			return nil, err
-		}
-		if dumpID.Valid {
-			v := dumpID.Int64
-			r.DumpID = &v
-		}
-		r.CleanRestore = clean == 1
-		r.RestoredAt = parseTime(restored)
-		out = append(out, r)
+	out := make([]RestoreRecord, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, restoreRecordFromRow(row))
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Store) ListAudit(action string, limit int) ([]AuditEntry, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	var rows *sql.Rows
+	var rows []sqlcgen.AuditLog
 	var err error
 	if action != "" {
-		rows, err = s.db.Query(`
-			SELECT id, occurred_at, action, status, subject, destination, details, error_message
-			FROM audit_log WHERE action = ? ORDER BY occurred_at DESC LIMIT ?`, action, limit)
+		rows, err = s.queries.ListAuditLogByAction(s.ctx(), sqlcgen.ListAuditLogByActionParams{
+			Action: action,
+			Limit:  int64(limit),
+		})
 	} else {
-		rows, err = s.db.Query(`
-			SELECT id, occurred_at, action, status, subject, destination, details, error_message
-			FROM audit_log ORDER BY occurred_at DESC LIMIT ?`, limit)
+		rows, err = s.queries.ListAuditLog(s.ctx(), int64(limit))
 	}
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []AuditEntry
-	for rows.Next() {
-		var e AuditEntry
-		var at string
-		if err := rows.Scan(&e.ID, &at, &e.Action, &e.Status, &e.Subject, &e.Destination, &e.Details, &e.ErrorMessage); err != nil {
-			return nil, err
-		}
-		e.OccurredAt = parseTime(at)
-		out = append(out, e)
+	out := make([]AuditEntry, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, auditEntryFromRow(row))
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Store) ScanDumpsRoot(dumpsRoot string) (int, error) {
@@ -215,7 +175,6 @@ func dumpsItemKeyFromPath(rel string) string {
 	parts := strings.Split(rel, "/")
 	if len(parts) < 2 {
 		if len(parts) == 1 {
-			// prod/prod_ts.dump -> prod
 			base := strings.TrimSuffix(parts[0], filepath.Ext(parts[0]))
 			if idx := strings.Index(base, "_"); idx > 0 {
 				return strings.ReplaceAll(base[:idx], "__", ":")

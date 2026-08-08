@@ -44,6 +44,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .dumpmgr
 *.dump
 *.sql
+!golang-port/internal/vault/schema.sql
+!golang-port/internal/vault/queries/*.sql
 *.enc
 /dumpmgr
 /dumpmgr.exe
