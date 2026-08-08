@@ -2,38 +2,27 @@ package vault
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+
+	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/vault/sqlcgen"
 )
 
 func (s *Store) ListSecrets() ([]SecretInfo, error) {
-	rows, err := s.db.Query(`SELECT key, created_at, updated_at, last_used_at FROM secrets ORDER BY key`)
+	rows, err := s.queries.ListSecrets(s.ctx())
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []SecretInfo
-	for rows.Next() {
-		var info SecretInfo
-		var created, updated string
-		var lastUsed sql.NullString
-		if err := rows.Scan(&info.Key, &created, &updated, &lastUsed); err != nil {
-			return nil, err
-		}
-		info.CreatedAt = parseTime(created)
-		info.UpdatedAt = parseTime(updated)
-		if lastUsed.Valid {
-			t := parseTime(lastUsed.String)
-			info.LastUsedAt = &t
-		}
-		out = append(out, info)
+	out := make([]SecretInfo, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, secretInfoFromRow(row))
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Store) GetSecretCiphertext(key string) (string, bool, error) {
-	var cipher string
-	err := s.db.QueryRow(`SELECT ciphertext FROM secrets WHERE key = ?`, key).Scan(&cipher)
-	if err == sql.ErrNoRows {
+	cipher, err := s.queries.GetSecretCiphertext(s.ctx(), key)
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
 	if err != nil {
@@ -50,24 +39,33 @@ func (s *Store) UpsertSecret(key, ciphertext string, rotationAction string) erro
 	defer tx.Rollback()
 
 	now := s.now()
-	var exists int
-	_ = tx.QueryRow(`SELECT 1 FROM secrets WHERE key = ?`, key).Scan(&exists)
-	if exists == 1 {
-		if _, err := tx.Exec(`UPDATE secrets SET ciphertext = ?, updated_at = ? WHERE key = ?`, ciphertext, now, key); err != nil {
-			return err
-		}
-		if rotationAction == "" {
-			rotationAction = RotationUpdated
-		}
-	} else {
-		if _, err := tx.Exec(`INSERT INTO secrets (key, ciphertext, created_at, updated_at) VALUES (?, ?, ?, ?)`, key, ciphertext, now, now); err != nil {
+	qtx := s.queries.WithTx(tx)
+	_, err = qtx.SecretExists(s.ctx(), key)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		if err := qtx.InsertSecret(s.ctx(), sqlcgen.InsertSecretParams{
+			Key: key, Ciphertext: ciphertext, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
 			return err
 		}
 		if rotationAction == "" {
 			rotationAction = RotationCreated
 		}
+	case err != nil:
+		return err
+	default:
+		if err := qtx.UpdateSecret(s.ctx(), sqlcgen.UpdateSecretParams{
+			Ciphertext: ciphertext, UpdatedAt: now, Key: key,
+		}); err != nil {
+			return err
+		}
+		if rotationAction == "" {
+			rotationAction = RotationUpdated
+		}
 	}
-	if _, err := tx.Exec(`INSERT INTO secret_rotations (secret_key, action, rotated_at) VALUES (?, ?, ?)`, key, rotationAction, now); err != nil {
+	if err := qtx.InsertSecretRotation(s.ctx(), sqlcgen.InsertSecretRotationParams{
+		SecretKey: key, Action: rotationAction, RotatedAt: now,
+	}); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -77,8 +75,10 @@ func (s *Store) UpsertSecret(key, ciphertext string, rotationAction string) erro
 }
 
 func (s *Store) TouchSecretUsed(key string) error {
-	_, err := s.db.Exec(`UPDATE secrets SET last_used_at = ? WHERE key = ?`, s.now(), key)
-	return err
+	return s.queries.TouchSecretUsed(s.ctx(), sqlcgen.TouchSecretUsedParams{
+		LastUsedAt: nullString(s.now()),
+		Key:        key,
+	})
 }
 
 func (s *Store) DeleteSecret(key string) (bool, error) {
@@ -88,17 +88,19 @@ func (s *Store) DeleteSecret(key string) (bool, error) {
 	}
 	defer tx.Rollback()
 
-	var exists int
-	if err := tx.QueryRow(`SELECT 1 FROM secrets WHERE key = ?`, key).Scan(&exists); err == sql.ErrNoRows || exists != 1 {
+	qtx := s.queries.WithTx(tx)
+	if _, err := qtx.SecretExists(s.ctx(), key); errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	} else if err != nil {
 		return false, err
 	}
 	now := s.now()
-	if _, err := tx.Exec(`DELETE FROM secrets WHERE key = ?`, key); err != nil {
+	if err := qtx.DeleteSecret(s.ctx(), key); err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(`INSERT INTO secret_rotations (secret_key, action, rotated_at) VALUES (?, ?, ?)`, key, RotationWiped, now); err != nil {
+	if err := qtx.InsertSecretRotation(s.ctx(), sqlcgen.InsertSecretRotationParams{
+		SecretKey: key, Action: RotationWiped, RotatedAt: now,
+	}); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -111,42 +113,23 @@ func (s *Store) ListSecretRotations(key string, limit int) ([]SecretRotation, er
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.Query(`
-		SELECT id, secret_key, action, rotated_at FROM secret_rotations
-		WHERE secret_key = ? ORDER BY rotated_at DESC LIMIT ?`, key, limit)
+	rows, err := s.queries.ListSecretRotations(s.ctx(), sqlcgen.ListSecretRotationsParams{
+		SecretKey: key,
+		Limit:     int64(limit),
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []SecretRotation
-	for rows.Next() {
-		var r SecretRotation
-		var at string
-		if err := rows.Scan(&r.ID, &r.SecretKey, &r.Action, &at); err != nil {
-			return nil, err
-		}
-		r.RotatedAt = parseTime(at)
-		out = append(out, r)
+	out := make([]SecretRotation, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, secretRotationFromRow(row))
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Store) ReencryptAllSecrets(reencrypt func(ciphertext string) (string, error)) error {
-	rows, err := s.db.Query(`SELECT key, ciphertext FROM secrets`)
+	pairs, err := s.queries.ListAllSecretCiphertexts(s.ctx())
 	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	type pair struct{ key, cipher string }
-	var pairs []pair
-	for rows.Next() {
-		var p pair
-		if err := rows.Scan(&p.key, &p.cipher); err != nil {
-			return err
-		}
-		pairs = append(pairs, p)
-	}
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	tx, err := s.db.Begin()
@@ -155,15 +138,20 @@ func (s *Store) ReencryptAllSecrets(reencrypt func(ciphertext string) (string, e
 	}
 	defer tx.Rollback()
 	now := s.now()
+	qtx := s.queries.WithTx(tx)
 	for _, p := range pairs {
-		next, err := reencrypt(p.cipher)
+		next, err := reencrypt(p.Ciphertext)
 		if err != nil {
-			return fmt.Errorf("re-encrypt %s: %w", p.key, err)
+			return fmt.Errorf("re-encrypt %s: %w", p.Key, err)
 		}
-		if _, err := tx.Exec(`UPDATE secrets SET ciphertext = ?, updated_at = ? WHERE key = ?`, next, now, p.key); err != nil {
+		if err := qtx.UpdateSecretCiphertext(s.ctx(), sqlcgen.UpdateSecretCiphertextParams{
+			Ciphertext: next, UpdatedAt: now, Key: p.Key,
+		}); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO secret_rotations (secret_key, action, rotated_at) VALUES (?, ?, ?)`, p.key, RotationMasterReencrypt, now); err != nil {
+		if err := qtx.InsertSecretRotation(s.ctx(), sqlcgen.InsertSecretRotationParams{
+			SecretKey: p.Key, Action: RotationMasterReencrypt, RotatedAt: now,
+		}); err != nil {
 			return err
 		}
 	}

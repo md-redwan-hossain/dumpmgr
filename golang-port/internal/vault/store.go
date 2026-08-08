@@ -2,17 +2,23 @@ package vault
 
 import (
 	"database/sql"
+	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/vault/sqlcgen"
 	_ "modernc.org/sqlite"
 )
 
+//go:embed schema.sql
+var schemaSQL string
+
 type Store struct {
-	db   *sql.DB
-	path string
+	db      *sql.DB
+	path    string
+	queries *sqlcgen.Queries
 }
 
 func DBPathForConfig(configPath string) string {
@@ -24,20 +30,7 @@ func Open(configPath string) (*Store, error) {
 	if err := migrateLegacyIfNeeded(configPath, path); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
-	if err != nil {
-		return nil, err
-	}
-	if err := db.Ping(); err != nil {
-		db.Close()
-		return nil, err
-	}
-	s := &Store{db: db, path: path}
-	if err := s.migrate(); err != nil {
-		db.Close()
-		return nil, err
-	}
-	return s, nil
+	return openVaultDB(path)
 }
 
 func (s *Store) Close() error {
@@ -49,19 +42,40 @@ func (s *Store) Close() error {
 
 func (s *Store) Path() string { return s.path }
 
+func openVaultDB(path string) (*Store, error) {
+	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	s := &Store{db: db, path: path, queries: sqlcgen.New(db)}
+	if err := s.migrate(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
 func (s *Store) migrate() error {
-	if _, err := s.db.Exec(schemaDDL); err != nil {
+	if _, err := s.db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		return fmt.Errorf("vault schema: %w", err)
 	}
-	var version int
-	err := s.db.QueryRow(`SELECT COALESCE((SELECT 1 FROM vault_meta WHERE id = 1), 0)`).Scan(&version)
+	if _, err := s.db.Exec(schemaSQL); err != nil {
+		return fmt.Errorf("vault schema: %w", err)
+	}
+	exists, err := s.queries.VaultMetaRowExists(s.ctx())
 	if err != nil {
 		return err
 	}
-	if version == 0 {
-		now := time.Now().UTC().Format(time.RFC3339Nano)
-		_, err = s.db.Exec(`INSERT INTO vault_meta (id, created_at, updated_at) VALUES (1, ?, ?)`, now, now)
-		return err
+	if exists == 0 {
+		now := s.now()
+		return s.queries.InsertVaultMeta(s.ctx(), sqlcgen.InsertVaultMetaParams{
+			CreatedAt: now,
+			UpdatedAt: now,
+		})
 	}
 	return nil
 }
@@ -71,40 +85,39 @@ func (s *Store) now() string {
 }
 
 func (s *Store) touchVaultMeta() error {
-	_, err := s.db.Exec(`UPDATE vault_meta SET updated_at = ? WHERE id = 1`, s.now())
-	return err
+	return s.queries.TouchVaultMeta(s.ctx(), s.now())
 }
 
 func (s *Store) HasMaster() (bool, error) {
-	var hash, salt sql.NullString
-	err := s.db.QueryRow(`SELECT master_password_hash, kdf_salt FROM vault_meta WHERE id = 1`).Scan(&hash, &salt)
+	row, err := s.queries.GetVaultMasterFields(s.ctx())
 	if err != nil {
 		return false, err
 	}
-	return hash.Valid && hash.String != "" && salt.Valid && salt.String != "", nil
+	return row.MasterPasswordHash.Valid && row.MasterPasswordHash.String != "" &&
+		row.KdfSalt.Valid && row.KdfSalt.String != "", nil
 }
 
 func (s *Store) VaultMeta() (masterHash, kdfSalt, encID, s3Key sql.NullString, err error) {
-	err = s.db.QueryRow(`SELECT master_password_hash, kdf_salt, enc_id, s3_secret_key FROM vault_meta WHERE id = 1`).
-		Scan(&masterHash, &kdfSalt, &encID, &s3Key)
-	return
+	row, err := s.queries.GetVaultMetaRow(s.ctx())
+	if err != nil {
+		return
+	}
+	return row.MasterPasswordHash, row.KdfSalt, row.EncID, row.S3SecretKey, nil
 }
 
 func (s *Store) SetVaultMeta(masterHash, kdfSalt, encID string, s3Key *string) error {
-	now := s.now()
-	var s3 sql.NullString
-	if s3Key != nil {
-		s3 = sql.NullString{String: *s3Key, Valid: true}
-	}
-	_, err := s.db.Exec(`
-		UPDATE vault_meta SET master_password_hash = ?, kdf_salt = ?, enc_id = ?, s3_secret_key = ?, updated_at = ?
-		WHERE id = 1`, masterHash, kdfSalt, encID, s3, now)
-	return err
+	return s.queries.SetVaultMeta(s.ctx(), sqlcgen.SetVaultMetaParams{
+		MasterPasswordHash: nullString(masterHash),
+		KdfSalt:            nullString(kdfSalt),
+		EncID:              nullString(encID),
+		S3SecretKey:        optionalNullString(s3Key),
+		UpdatedAt:          s.now(),
+	})
 }
 
 func (s *Store) EncID() (string, error) {
-	var encID sql.NullString
-	if err := s.db.QueryRow(`SELECT enc_id FROM vault_meta WHERE id = 1`).Scan(&encID); err != nil {
+	encID, err := s.queries.GetVaultEncID(s.ctx())
+	if err != nil {
 		return "", err
 	}
 	if encID.Valid {
@@ -114,13 +127,17 @@ func (s *Store) EncID() (string, error) {
 }
 
 func (s *Store) SetEncID(encID string) error {
-	_, err := s.db.Exec(`UPDATE vault_meta SET enc_id = ?, updated_at = ? WHERE id = 1`, encID, s.now())
-	return err
+	return s.queries.SetVaultEncID(s.ctx(), sqlcgen.SetVaultEncIDParams{
+		EncID:     nullString(encID),
+		UpdatedAt: s.now(),
+	})
 }
 
 func (s *Store) SetS3SecretKey(ciphertext string) error {
-	_, err := s.db.Exec(`UPDATE vault_meta SET s3_secret_key = ?, updated_at = ? WHERE id = 1`, ciphertext, s.now())
-	return err
+	return s.queries.SetVaultS3SecretKey(s.ctx(), sqlcgen.SetVaultS3SecretKeyParams{
+		S3SecretKey: nullString(ciphertext),
+		UpdatedAt:   s.now(),
+	})
 }
 
 func (s *Store) Status() (Status, error) {
@@ -132,27 +149,35 @@ func (s *Store) Status() (Status, error) {
 	st.HasMaster = has
 	encID, _ := s.EncID()
 	st.EncID = encID
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM secrets`).Scan(&st.SecretCount)
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM dump_files`).Scan(&st.DumpCount)
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM audit_log`).Scan(&st.AuditCount)
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM restore_history`).Scan(&st.RestoreCount)
+	secretCount, _ := s.queries.CountSecrets(s.ctx())
+	dumpCount, _ := s.queries.CountDumpFiles(s.ctx())
+	auditCount, _ := s.queries.CountAuditLog(s.ctx())
+	restoreCount, _ := s.queries.CountRestoreHistory(s.ctx())
+	st.SecretCount = int(secretCount)
+	st.DumpCount = int(dumpCount)
+	st.AuditCount = int(auditCount)
+	st.RestoreCount = int(restoreCount)
 	return st, nil
 }
 
 func (s *Store) RecordAudit(action, status, subject, destination, details, errMsg string) error {
-	_, err := s.db.Exec(`
-		INSERT INTO audit_log (occurred_at, action, status, subject, destination, details, error_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		s.now(), action, status, subject, destination, details, errMsg)
-	return err
+	return s.queries.InsertAuditLog(s.ctx(), sqlcgen.InsertAuditLogParams{
+		OccurredAt:   s.now(),
+		Action:       action,
+		Status:       status,
+		Subject:      subject,
+		Destination:  destination,
+		Details:      details,
+		ErrorMessage: errMsg,
+	})
 }
 
-func parseTime(s string) time.Time {
-	t, err := time.Parse(time.RFC3339Nano, s)
+func (s *Store) CreatedAt() (time.Time, error) {
+	created, err := s.queries.GetVaultCreatedAt(s.ctx())
 	if err != nil {
-		t, _ = time.Parse(time.RFC3339, s)
+		return time.Time{}, err
 	}
-	return t
+	return parseTime(created), nil
 }
 
 func fileExists(path string) bool {

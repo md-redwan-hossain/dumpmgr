@@ -1,8 +1,3 @@
-package vault
-
-const schemaDDL = `
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE IF NOT EXISTS vault_meta (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   master_password_hash TEXT,
@@ -73,4 +68,3 @@ CREATE TABLE IF NOT EXISTS restore_history (
 );
 CREATE INDEX IF NOT EXISTS idx_restore_history_restored_at ON restore_history(restored_at DESC);
 CREATE INDEX IF NOT EXISTS idx_restore_history_destination ON restore_history(destination_key);
-`
