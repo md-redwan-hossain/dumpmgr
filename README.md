@@ -46,6 +46,8 @@ is unavailable.
 | `config init --with-fake-data` | Same, but skip the fake-data prompt and use samples |
 | `config validate` | Validate `config.jsonc` and print a summary report |
 | `config lint` | Format `config.jsonc` in place (2-space indent; **preserves comments**) |
+| `autonomous` | Run scheduled backups from `autonomous.schedules` (cron + optional S3 upload) |
+| `autonomous --once` | Run all configured schedules immediately once and exit |
 | `-c, --config <path>` | Config path (default: `config.jsonc`) |
 | `--yes` | Skip overwrite confirms; auto-create missing destination DB (flat restore only; never auto-drops) |
 
@@ -58,6 +60,101 @@ bun run dumpmgr config lint
 bun run dumpmgr doctor
 bun run dumpmgr secret list
 bun run dumpmgr secret wipe postgres:prod
+bun run dumpmgr autonomous --once
+```
+
+## Autonomous mode (Docker Compose)
+
+Run dumpmgr as a long-lived container that takes backups on a **cron schedule** and optionally uploads them to S3. This is separate from the interactive CLI — all existing commands and flows stay the same.
+
+The container mounts the host Docker socket (`/var/run/docker.sock`) so it can spawn ephemeral `postgres` images for `pg_dump`, same as the CLI.
+
+### Quick start
+
+1. Prepare config and metadata interactively once (store DB passwords in metadata):
+
+```powershell
+bun run dumpmgr config init --with-fake-data
+# edit config.jsonc — add autonomous.schedules (see below)
+bun run dumpmgr dump   # connect once per DB so passwords are saved in metadata
+```
+
+2. Create `.env` next to `docker-compose.yml`:
+
+```env
+DUMPMGR_MASTER_PASSWORD=your-master-password
+# optional if not already stored in metadata via interactive s3 upload:
+# DUMPMGR_S3_SECRET_KEY=your-s3-secret-key
+```
+
+3. Start the scheduler:
+
+```powershell
+docker compose up -d --build
+docker compose logs -f dumpmgr
+```
+
+`docker-compose.yml` mounts `./config.jsonc`, `./metadata`, and `./dumps`, and sets `working_dir` to `/data`. Use `"dumpDirectory": "."` in config so dumps land in `./dumps` on the host.
+
+### Config: `autonomous`
+
+```jsonc
+{
+  "rememberPassword": true,
+  "encryptedDump": false,
+  "dumpDirectory": ".",
+  "image": "postgres:18",
+  "s3Options": {
+    "endpoint": "https://s3.example.com",
+    "accessKey": "your-access-key",
+    "bucketName": "your-bucket",
+    "useHttps": true,
+    "forcePathStyle": true,
+  },
+  "autonomous": {
+    "schedules": [
+      {
+        "cron": "0 2 * * *",       // daily at 02:00 UTC
+        "items": ["prod"],         // omit or [] to dump all configured items
+        "uploadToS3": true,        // requires s3Options
+      },
+      {
+        "cron": "0 */6 * * *",     // every 6 hours — all items, local only
+      },
+    ],
+  },
+  "items": {
+    "prod": {
+      "host": "127.0.0.1",
+      "port": 5432,
+      "user": "db_user",
+      "database": "app_db",
+    },
+  },
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `cron` | Cron expression (standard 5-field syntax, UTC) |
+| `items` | Optional list of item keys (`prod`, `parent:child`). Empty/omitted dumps **all** items |
+| `uploadToS3` | After each dump, upload to configured S3 (default `false`) |
+
+### Environment variables (autonomous)
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `DUMPMGR_MASTER_PASSWORD` | When `rememberPassword`, `encryptedDump`, or `s3Options` | Unlock metadata without prompts |
+| `DUMPMGR_S3_SECRET_KEY` | When uploading and key not in metadata | S3 secret access key |
+| `DUMPMGR_DOCKER_NETWORK` | Optional | Docker network for pg_dump containers (compose default: `host` on Linux) |
+
+DB passwords must already be stored in `metadata` (run an interactive dump once per database). Autonomous mode does not prompt.
+
+### Local testing without Compose
+
+```powershell
+$env:DUMPMGR_MASTER_PASSWORD="your-master"
+bun run dumpmgr autonomous --once -c config.jsonc
 ```
 
 ## Config

@@ -76,6 +76,7 @@ import {
   uploadToS3,
   verifyS3Bucket,
 } from "./s3.ts";
+import { runAutonomous } from "./autonomous.ts";
 
 type CliMode = "dump" | "restore" | "dump-restore";
 type S3Action = "upload" | "download";
@@ -640,6 +641,7 @@ addCommonOptions(
       "after",
       [
         "Auxiliary commands:",
+        "  autonomous          Run scheduled backups (cron + optional S3 upload)",
         "  doctor              Check Docker / dumps dir / metadata integrity",
         "  s3 upload           Upload a local dump to S3",
         "  s3 download         Browse and download a dump from S3",
@@ -653,6 +655,33 @@ addCommonOptions(
 });
 
 addModeCommands(program);
+
+program
+  .command("autonomous")
+  .description(
+    "Run scheduled backups from config autonomous.schedules (cron + optional S3)",
+  )
+  .option("-c, --config <path>", "Path to config.jsonc", DEFAULT_CONFIG_PATH)
+  .option("--debug", "Print docker/DB commands being executed")
+  .option("--once", "Run all schedules immediately once and exit")
+  .action(async (opts: { config: string; debug?: boolean; once?: boolean }) => {
+    const configPath = resolve(opts.config);
+    if (!(await configExists(configPath))) {
+      console.error(`Config file not found: ${configPath}`);
+      process.exit(1);
+    }
+    try {
+      await runAutonomous({
+        configPath,
+        debug: opts.debug,
+        once: opts.once,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(message);
+      process.exit(1);
+    }
+  });
 
 const s3Cmd = program
   .command("s3")
