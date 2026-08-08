@@ -31,6 +31,9 @@ type Options struct {
 	Yes        bool
 	Debug      bool
 	Mode       Mode
+	Source     string
+	Dest       string
+	Dump       string
 }
 
 type S3Action string
@@ -366,7 +369,7 @@ func RunMode(mode Mode, opts Options, cfg *config.Config, session *metadata.Sess
 }
 
 func runDump(opts Options, cfg *config.Config, session *metadata.Session, items []config.DatabaseItem, image, dumpsRoot string) error {
-	sourceItem, err := prompt.SelectDatabaseItem(items, "Select database to dump", "")
+	sourceItem, err := prompt.ResolveDatabaseItem(items, opts.Source, "Select database to dump", "")
 	if err != nil {
 		return err
 	}
@@ -405,146 +408,47 @@ func runDump(opts Options, cfg *config.Config, session *metadata.Session, items 
 }
 
 func runRestore(opts Options, cfg *config.Config, session *metadata.Session, image, dumpsRoot string) error {
-	dumpPath, err := prompt.BrowseDumpFile(dumpsRoot, cfg.EncryptedDump)
-	if err != nil {
-		return err
+	var dumpPath string
+	var err error
+	if opts.Dump != "" {
+		dumpPath = opts.Dump
+		if abs, absErr := filepath.Abs(dumpPath); absErr == nil {
+			dumpPath = abs
+		}
+		if _, statErr := os.Stat(dumpPath); statErr != nil {
+			return fmt.Errorf("dump file not found: %s", dumpPath)
+		}
+	} else {
+		dumpPath, err = prompt.BrowseDumpFile(dumpsRoot, cfg.EncryptedDump)
+		if err != nil {
+			return err
+		}
 	}
 	fileName := filepath.Base(dumpPath)
 	dir := filepath.Dir(dumpPath)
 
-	destItem, err := prompt.SelectDatabaseTree(cfg, "Select destination database", "")
+	destItem, err := prompt.ResolveDatabaseTree(cfg, opts.Dest, "Select destination database", "")
 	if err != nil {
 		return err
 	}
 
-	var destDB docker.ResolvedDB
-	intoExisting := false
-
-	if destItem.Nested && destItem.ParentKey != "" {
-		parentItem := config.GetParentItem(cfg, destItem.ParentKey)
-		if parentItem == nil {
-			return fmt.Errorf(`nested destination %q needs parent %q with user+database for connection verify`, destItem.Key, destItem.ParentKey)
-		}
-		fmt.Printf("→ Verifying parent %q…\n", parentItem.Key)
-		parentDB, err := resolveConnectedDB(cfg, session, *parentItem, "destination", false)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("✓ Parent %q OK\n", parentItem.Key)
-
-		parentLogin := parentDB.Database
-		childTarget := docker.ResolvedDB{
-			DatabaseItem: config.DatabaseItem{
-				Key: destItem.Key, Host: parentDB.Host, Port: parentDB.Port,
-				User: parentDB.User, Database: destItem.Database, Nested: true, ParentKey: destItem.ParentKey,
-			},
-			Password: parentDB.Password,
-		}
-		childExists, err := docker.DatabaseExists(image, childTarget, parentLogin)
-		if err != nil {
-			return err
-		}
-		action, err := prompt.SelectNestedRestoreAction(fmt.Sprintf(`Restore %q into %q?`, fileName, destItem.Key), childExists)
-		if err != nil {
-			return err
-		}
-		if action == prompt.NestedNo {
-			fmt.Println("⚠ Restore cancelled")
-			return nil
-		}
-		if action == prompt.NestedDrop {
-			fmt.Printf("→ Dropping database %q…\n", destItem.Database)
-			if err := docker.DropDatabase(image, childTarget, parentLogin); err != nil {
-				return err
-			}
-			fmt.Printf("→ Creating database %q…\n", destItem.Database)
-			if err := docker.CreateDatabase(image, childTarget, parentLogin); err != nil {
-				return err
-			}
-			fmt.Printf("✓ Recreated %q\n", destItem.Database)
-		} else if action == prompt.NestedCreate {
-			fmt.Printf("→ Creating database %q…\n", destItem.Database)
-			if err := docker.CreateDatabase(image, childTarget, parentLogin); err != nil {
-				return err
-			}
-			fmt.Printf("✓ Created %q\n", destItem.Database)
-		}
-
-		if action == prompt.NestedCreate || action == prompt.NestedDrop {
-			if parentDB.User == destItem.User {
-				item := destItem
-				item.User = parentDB.User
-				destDB = docker.ResolvedDB{DatabaseItem: item, Password: parentDB.Password}
-			} else {
-				childKey := config.DBKey(destItem.Key)
-				var saved string
-				if session != nil && cfg.RememberPassword {
-					saved, _ = metadata.GetDBPassword(session, childKey)
-				}
-				var pwSource prompt.NestedCreatePasswordSource
-				if opts.Yes {
-					pwSource = prompt.PasswordParent
-				} else {
-					pwSource, err = prompt.SelectNestedCreatePassword(saved != "")
-					if err != nil {
-						return err
-					}
-				}
-				switch pwSource {
-				case prompt.PasswordParent:
-					item := destItem
-					item.User = parentDB.User
-					destDB = docker.ResolvedDB{DatabaseItem: item, Password: parentDB.Password}
-				case prompt.PasswordSaved:
-					if saved == "" {
-						return fmt.Errorf("no saved password for %q", destItem.Key)
-					}
-					destDB = docker.ResolvedDB{DatabaseItem: destItem, Password: saved}
-				case prompt.PasswordNew:
-					password, err := prompt.ConfirmedPassword(fmt.Sprintf("password for %s (%s)", destItem.Key, destItem.User))
-					if err != nil {
-						return err
-					}
-					fmt.Printf("→ Ensuring login %q…\n", destItem.User)
-					if err := docker.EnsureDatabaseLogin(image, parentDB, docker.EnsureLoginOpts{
-						User: destItem.User, Password: password, Database: destItem.Database, ConnectDatabase: parentLogin,
-					}); err != nil {
-						return err
-					}
-					if cfg.RememberPassword && session != nil {
-						if err := metadata.SetDBPassword(session, childKey, password); err != nil {
-							return err
-						}
-					}
-					destDB = docker.ResolvedDB{DatabaseItem: destItem, Password: password}
-					fmt.Printf("✓ Login %q ready\n", destItem.User)
-				}
-			}
-		} else {
-			intoExisting = true
-			item := destItem
-			item.User = parentDB.User
-			destDB = docker.ResolvedDB{DatabaseItem: item, Password: parentDB.Password}
-		}
-	} else {
-		destDB, err = resolveConnectedDB(cfg, session, destItem, "destination", true)
-		if err != nil {
-			return err
-		}
-		created, err := ensureDestDatabase(cfg, destDB, destItem.Key, opts.Yes)
-		if err != nil {
-			return err
-		}
-		intoExisting = !created
-		confirmed, err := prompt.ConfirmOrYes(fmt.Sprintf(`Restore %q into %q?`, fileName, destItem.Key), opts.Yes, false)
-		if err != nil {
-			return err
-		}
-		if !confirmed {
-			fmt.Println("⚠ Restore cancelled")
-			return nil
-		}
+	prepared, err := PrepareRestoreDestination(PrepareRestoreDestinationOpts{
+		Config:         cfg,
+		Session:        session,
+		DestItem:       destItem,
+		Image:          image,
+		Yes:            opts.Yes,
+		ConfirmMessage: fmt.Sprintf(`Restore %q into %q?`, fileName, destItem.Key),
+	})
+	if err != nil {
+		return err
 	}
+	if prepared.Cancelled {
+		fmt.Println("⚠ Restore cancelled")
+		return nil
+	}
+	destDB := prepared.DestDB
+	intoExisting := prepared.IntoExisting
 
 	clean, err := resolveRestoreClean(intoExisting, opts.Yes)
 	if err != nil {
@@ -582,11 +486,11 @@ func runRestore(opts Options, cfg *config.Config, session *metadata.Session, ima
 }
 
 func runDumpRestore(opts Options, cfg *config.Config, session *metadata.Session, items []config.DatabaseItem, image, dumpsRoot string) error {
-	sourceItem, err := prompt.SelectDatabaseItem(items, "Select source database", "")
+	sourceItem, err := prompt.ResolveDatabaseItem(items, opts.Source, "Select source database", "")
 	if err != nil {
 		return err
 	}
-	destItem, err := prompt.SelectDatabaseTree(cfg, "Select destination database", sourceItem.Key)
+	destItem, err := prompt.ResolveDatabaseTree(cfg, opts.Dest, "Select destination database", sourceItem.Key)
 	if err != nil {
 		return err
 	}
@@ -594,14 +498,24 @@ func runDumpRestore(opts Options, cfg *config.Config, session *metadata.Session,
 	if err != nil {
 		return err
 	}
-	destDB, err := resolveConnectedDB(cfg, session, destItem, "destination", true)
+
+	prepared, err := PrepareRestoreDestination(PrepareRestoreDestinationOpts{
+		Config:         cfg,
+		Session:        session,
+		DestItem:       destItem,
+		Image:          image,
+		Yes:            opts.Yes,
+		ConfirmMessage: fmt.Sprintf(`Sync into %q?`, destItem.Key),
+	})
 	if err != nil {
 		return err
 	}
-	destCreated, err := ensureDestDatabase(cfg, destDB, destItem.Key, opts.Yes)
-	if err != nil {
-		return err
+	if prepared.Cancelled {
+		fmt.Println("⚠ Sync cancelled")
+		return nil
 	}
+	destDB := prepared.DestDB
+	destIntoExisting := prepared.IntoExisting
 
 	fmt.Println("Sync plan")
 	fmt.Printf("  Source:      %s → %s@%s:%d/%s\n", sourceItem.Key, sourceDB.User, sourceDB.Host, sourceDB.Port, sourceDB.Database)
@@ -623,7 +537,7 @@ func runDumpRestore(opts Options, cfg *config.Config, session *metadata.Session,
 		return nil
 	}
 
-	clean, err := resolveRestoreClean(!destCreated, opts.Yes)
+	clean, err := resolveRestoreClean(destIntoExisting, opts.Yes)
 	if err != nil {
 		return err
 	}
@@ -697,9 +611,6 @@ func RunMain(opts Options) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
-	}
-	if cfg.EncryptedDump && !cfg.RememberPassword {
-		fmt.Println(`⚠ encryptedDump is true but rememberPassword is false. Encrypted dumps need the master-derived AES key, so set "rememberPassword": true in config.jsonc (or disable encryptedDump).`)
 	}
 	session, err := UnlockOrNull(cfg, configPath)
 	if err != nil {

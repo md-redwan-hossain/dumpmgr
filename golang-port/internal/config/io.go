@@ -43,6 +43,9 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid config (%s): %w", path, err)
 	}
+	if err := ValidateEncryptedDumpPolicy(cfg); err != nil {
+		return nil, fmt.Errorf("invalid config (%s):\n  - %w", path, err)
+	}
 	return cfg, nil
 }
 
@@ -82,6 +85,9 @@ func ValidateFile(path string) ValidateResult {
 		return ValidateResult{OK: false, Issues: []string{fmt.Sprintf("invalid JSONC: %v", err)}}
 	}
 	ApplyDefaults(&cfg)
+	if err := ValidateEncryptedDumpPolicy(&cfg); err != nil {
+		return ValidateResult{OK: false, Issues: []string{err.Error()}}
+	}
 	if issues := ValidateConfig(&cfg); len(issues) > 0 {
 		return ValidateResult{OK: false, Issues: issues}
 	}

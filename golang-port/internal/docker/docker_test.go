@@ -3,6 +3,7 @@ package docker_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -12,10 +13,10 @@ import (
 
 func TestDockerHostRewrite(t *testing.T) {
 	cases := map[string]string{
-		"localhost":           "host.docker.internal",
-		"127.0.0.1":           "host.docker.internal",
-		"::1":                 "host.docker.internal",
-		"postgres.internal":   "postgres.internal",
+		"localhost":         "host.docker.internal",
+		"127.0.0.1":         "host.docker.internal",
+		"::1":               "host.docker.internal",
+		"postgres.internal": "postgres.internal",
 	}
 	for in, want := range cases {
 		if got := docker.DockerHost(in); got != want {
@@ -24,6 +25,22 @@ func TestDockerHostRewrite(t *testing.T) {
 	}
 	if docker.RestoreJobs() < 1 {
 		t.Fatal("expected at least one restore job")
+	}
+}
+
+func TestDockerRunHostArgs(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		args := docker.DockerRunHostArgs("localhost")
+		if len(args) != 2 || args[0] != "--add-host" || args[1] != "host.docker.internal:host-gateway" {
+			t.Fatalf("unexpected host-gateway args on linux: %v", args)
+		}
+	} else {
+		if len(docker.DockerRunHostArgs("localhost")) != 0 {
+			t.Fatal("expected no host-gateway args off linux")
+		}
+	}
+	if len(docker.DockerRunHostArgs("postgres.internal")) != 0 {
+		t.Fatal("expected no host-gateway for non-loopback host")
 	}
 }
 
