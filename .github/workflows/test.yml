@@ -5,6 +5,7 @@ on:
   pull_request:
 
 jobs:
+  test-typescript:
   unit:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -17,6 +18,20 @@ jobs:
       - run: bun run typecheck
       - run: bun run test:unit
 
+  test-golang:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: golang-port
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: golang-port/go.sum
+      - run: go test ./...
+      - run: go build -o dumpmgr ./cmd/dumpmgr
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 20
