@@ -37,6 +37,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 /config.jsonc
 /config.json
 /metadata
+/vault.db
+/vault.db-wal
+/vault.db-shm
 /dumps/
 .dumpmgr
 *.dump

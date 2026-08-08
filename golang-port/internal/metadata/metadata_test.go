@@ -6,30 +6,21 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/crypto"
 	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/metadata"
 )
 
 func TestPersistEncryptedSecrets(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "metadata")
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i + 10)
-	}
-	encID := "A1B2"
-	session := &metadata.Session{
-		MasterPassword: "test-master",
-		AESKey:         key,
-		Metadata: metadata.Metadata{
-			DBPasswords: map[string]string{},
-			EncID:       &encID,
-		},
-		MetadataPath: path,
-	}
-	if err := metadata.Write(path, session.Metadata); err != nil {
+	configPath := filepath.Join(dir, "config.jsonc")
+	if err := os.WriteFile(configPath, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	session, err := metadata.CreateWithMaster(configPath, "test-master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
 	if err := metadata.SetDBPassword(session, "postgres:prod", "db-secret"); err != nil {
 		t.Fatal(err)
 	}
@@ -44,20 +35,16 @@ func TestPersistEncryptedSecrets(t *testing.T) {
 	if err != nil || sk != "s3-secret" {
 		t.Fatalf("s3 secret: %q %v", sk, err)
 	}
-	info, err := os.Stat(path)
-	if err != nil || info.Size() <= 5 {
-		t.Fatal("expected metadata file to be written")
+	info, err := os.Stat(metadata.DBPathForConfig(configPath))
+	if err != nil || info.Size() <= 100 {
+		t.Fatal("expected vault database to be written")
 	}
 
-	reloaded := &metadata.Session{
-		MasterPassword: session.MasterPassword,
-		AESKey:         session.AESKey,
-		MetadataPath:   path,
-	}
-	reloaded.Metadata, err = metadata.Load(path)
+	reloaded, err := metadata.Unlock(configPath, "test-master")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer reloaded.Close()
 	pw, err = metadata.GetDBPassword(reloaded, "postgres:prod")
 	if err != nil || pw != "db-secret" {
 		t.Fatalf("reloaded db password: %q %v", pw, err)
@@ -80,55 +67,54 @@ func TestPersistEncryptedSecrets(t *testing.T) {
 	}
 }
 
-func TestEmptyMetadataAndLegacyMigration(t *testing.T) {
+func TestEmptyVaultAndLegacyMigration(t *testing.T) {
 	dir := t.TempDir()
-	emptyPath := filepath.Join(dir, "empty")
-	if _, err := metadata.Empty(emptyPath); err != nil {
+	configPath := filepath.Join(dir, "config.jsonc")
+	if err := metadata.Empty(configPath); err != nil {
 		t.Fatal(err)
 	}
-	meta, err := metadata.Load(emptyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(meta.DBPasswords) != 0 {
-		t.Fatalf("expected empty db passwords: %+v", meta.DBPasswords)
+	if _, err := os.Stat(metadata.DBPathForConfig(configPath)); err != nil {
+		t.Fatal("expected vault database")
 	}
 
 	legacyPath := filepath.Join(dir, "metadata.json")
-	binaryPath := filepath.Join(dir, "metadata")
 	legacy := `{"masterPassword":null,"kdfSalt":null,"dbPasswords":{},"encId":null}`
 	if err := os.WriteFile(legacyPath, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	migrated, err := metadata.Load(binaryPath)
+	if err := os.WriteFile(configPath, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(metadata.DBPathForConfig(configPath))
+
+	store, err := metadata.Open(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if migrated.EncID == nil || !regexp.MustCompile(`^[A-F0-9]{32}$`).MatchString(*migrated.EncID) {
-		t.Fatalf("expected migrated enc id: %+v", migrated.EncID)
+	defer store.Close()
+	encID, err := store.EncID()
+	if err != nil || encID == "" || !regexp.MustCompile(`^[A-F0-9]{32}$`).MatchString(encID) {
+		t.Fatalf("expected migrated enc id: %q %v", encID, err)
 	}
-	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
-		t.Fatal("expected legacy metadata.json to be removed")
-	}
-	info, err := os.Stat(binaryPath)
-	if err != nil || info.Size() <= 5 {
-		t.Fatal("expected binary metadata file")
+	if _, err := os.Stat(legacyPath + ".bak"); err != nil {
+		t.Fatal("expected legacy metadata.json backup")
 	}
 }
 
 func TestCreateWithMasterRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "metadata")
-	if _, err := metadata.CreateWithMaster(path, "master-pass"); err != nil {
+	configPath := filepath.Join(dir, "config.jsonc")
+	if err := os.WriteFile(configPath, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	session, err := metadata.Unlock(path, "master-pass")
+	session, err := metadata.CreateWithMaster(configPath, "master-pass")
 	if err != nil {
 		t.Fatal(err)
 	}
-	secret, err := crypto.EncryptSecret(session.AESKey, "value")
+	session.Close()
+	unlocked, err := metadata.Unlock(configPath, "master-pass")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = secret
+	unlocked.Close()
 }

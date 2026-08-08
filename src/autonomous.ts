@@ -28,9 +28,9 @@ import {
   resolveDumpsRoot,
 } from "./dumps.ts";
 import {
+  encId,
   getDbPassword,
   getS3SecretKey,
-  metadataPathForConfig,
   unlockSession,
   type Session,
 } from "./metadata.ts";
@@ -74,8 +74,7 @@ async function unlockAutonomousSession(
       `${MASTER_PASSWORD_ENV} is required for autonomous mode when rememberPassword, encryptedDump, or s3Options are enabled`,
     );
   }
-  const metaPath = metadataPathForConfig(configPath);
-  return await unlockSession(metaPath, master);
+  return await unlockSession(configPath, master);
 }
 
 async function resolveS3SecretKey(session: Session | null): Promise<string | null> {
@@ -153,10 +152,10 @@ export async function runScheduledDumpForItem(opts: {
     if (!session?.aesKey) {
       throw new Error("AES key required for encrypted dumps");
     }
-    const encId = session.metadata.encId;
-    if (!encId) throw new Error("encId missing from metadata");
+    const eid = encId(session);
+    if (!eid) throw new Error("encId missing from vault");
     log(`Encrypting dump for ${item.key}…`);
-    finalPath = await encryptDumpFile(dumpPath, session.aesKey, encId);
+    finalPath = await encryptDumpFile(dumpPath, session.aesKey, eid);
     log(`Encrypted ${basename(finalPath)} (${formatBytes(Bun.file(finalPath).size)})`);
   }
 

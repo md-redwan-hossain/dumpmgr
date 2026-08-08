@@ -1,15 +1,11 @@
-import { access, constants, mkdir, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { access, constants, mkdir, rm, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { Config } from "./config.ts";
 import { needsMaster } from "./config.ts";
 import { ensureDumpsRootWritable, resolveDumpsRoot } from "./dumps.ts";
 import { assertDockerAvailable } from "./docker.ts";
-import {
-  loadMetadata,
-  METADATA_MAGIC,
-  METADATA_VERSION,
-  metadataPathForConfig,
-} from "./metadata.ts";
+import { dbPathForConfig, vaultHasMaster } from "./metadata.ts";
+import { getEncId, openVault } from "./vault.ts";
 
 export type DoctorCheck = {
   name: string;
@@ -48,7 +44,7 @@ async function probeParentDir(parent: string): Promise<void> {
   } catch {
     throw new Error(`Parent directory is not writable: ${parent}`);
   }
-  const probe = join(parent, `.dumpmgr-doctor-${Date.now()}`);
+  const probe = `${parent}/.dumpmgr-doctor-${Date.now()}`;
   try {
     await writeFile(probe, "ok");
   } finally {
@@ -56,53 +52,19 @@ async function probeParentDir(parent: string): Promise<void> {
   }
 }
 
-async function checkMetadataMagic(metaPath: string): Promise<{
+async function checkVaultDb(vaultPath: string): Promise<{
   ok: boolean;
   message: string;
   hint?: string;
 }> {
-  const file = Bun.file(metaPath);
-  if (!(await file.exists())) {
+  if (!(await Bun.file(vaultPath).exists())) {
     return {
       ok: false,
-      message: `metadata file not found at ${metaPath}`,
+      message: `vault database not found at ${vaultPath}`,
       hint: "run `dumpmgr config init`",
     };
   }
-  let buf: Uint8Array;
-  try {
-    buf = new Uint8Array(await file.arrayBuffer());
-  } catch {
-    return {
-      ok: false,
-      message: `cannot read metadata at ${metaPath}`,
-    };
-  }
-  if (buf.length < METADATA_MAGIC.length + 1) {
-    return {
-      ok: false,
-      message: "metadata file is too short",
-      hint: "run `dumpmgr config init` to recreate",
-    };
-  }
-  for (let i = 0; i < METADATA_MAGIC.length; i++) {
-    if (buf[i] !== METADATA_MAGIC[i]) {
-      return {
-        ok: false,
-        message: "metadata has bad magic (not a DBSM file)",
-        hint: "delete the file and run `dumpmgr config init`",
-      };
-    }
-  }
-  const version = buf[METADATA_MAGIC.length];
-  if (version !== METADATA_VERSION) {
-    return {
-      ok: false,
-      message: `unsupported metadata version: ${version}`,
-      hint: `expected version ${METADATA_VERSION}`,
-    };
-  }
-  return { ok: true, message: `metadata magic OK (DBSM v${version})` };
+  return { ok: true, message: `vault database OK (${vaultPath})` };
 }
 
 export async function runDoctor(
@@ -111,7 +73,6 @@ export async function runDoctor(
 ): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
 
-  // Docker daemon
   try {
     await assertDockerAvailable();
     const ver = await dockerVersion();
@@ -126,7 +87,6 @@ export async function runDoctor(
     });
   }
 
-  // Dumps root parent dir writable
   const dumpsRoot = resolveDumpsRoot(config.dumpDirectory);
   const parent = dirname(dumpsRoot);
   try {
@@ -145,7 +105,6 @@ export async function runDoctor(
     });
   }
 
-  // Dumps root writable
   try {
     await ensureDumpsRootWritable(dumpsRoot);
     checks.push({
@@ -158,10 +117,9 @@ export async function runDoctor(
     checks.push({ name: "dumps-root", ok: false, message });
   }
 
-  // Metadata magic
-  const metaPath = metadataPathForConfig(configPath);
-  const magic = await checkMetadataMagic(metaPath);
-  checks.push({ name: "metadata-magic", ...magic });
+  const vaultPath = dbPathForConfig(configPath);
+  const vaultCheck = await checkVaultDb(vaultPath);
+  checks.push({ name: "vault-db", ...vaultCheck });
 
   if (config.s3Options) {
     checks.push({
@@ -172,64 +130,46 @@ export async function runDoctor(
     });
   }
 
-  // KDF salt + master hash + encId (only meaningful if we can decode the body)
-  if (magic.ok) {
+  if (vaultCheck.ok) {
     try {
-      const meta = await loadMetadata(metaPath);
-      if (needsMaster(config)) {
-        checks.push({
-          name: "kdf-salt",
-          ok: meta.kdfSalt != null,
-          message:
-            meta.kdfSalt != null
-              ? "kdfSalt present"
-              : "kdfSalt missing",
-          hint:
-            meta.kdfSalt == null
-              ? "run `dumpmgr config init` to set a master password"
-              : undefined,
-        });
-        checks.push({
-          name: "master-hash",
-          ok: meta.masterPassword != null,
-          message:
-            meta.masterPassword != null
-              ? "master password hash present"
-              : "master password hash missing",
-          hint:
-            meta.masterPassword == null
-              ? "run `dumpmgr config init` to set a master password"
-              : undefined,
-        });
-      }
-      if (config.encryptedDump) {
-        checks.push({
-          name: "enc-id",
-          ok: meta.encId != null,
-          message:
-            meta.encId != null
-              ? `encId present (${meta.encId})`
-              : "encId missing",
-          hint:
-            meta.encId == null
-              ? "encId is generated on next successful master unlock"
-              : undefined,
-        });
+      const db = await openVault(configPath);
+      try {
+        if (needsMaster(config)) {
+          const has = await vaultHasMaster(configPath);
+          checks.push({
+            name: "kdf-salt",
+            ok: has,
+            message: has ? "kdfSalt present" : "kdfSalt missing",
+            hint: has ? undefined : "run `dumpmgr config init` to set a master password",
+          });
+          checks.push({
+            name: "master-hash",
+            ok: has,
+            message: has ? "master password hash present" : "master password hash missing",
+            hint: has ? undefined : "run `dumpmgr config init` to set a master password",
+          });
+        }
+        if (config.encryptedDump) {
+          const id = getEncId(db);
+          checks.push({
+            name: "enc-id",
+            ok: Boolean(id),
+            message: id ? `encId present (${id})` : "encId missing",
+            hint: id ? undefined : "encId is generated on next successful master unlock",
+          });
+        }
+      } finally {
+        db.close();
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       checks.push({
-        name: "metadata-body",
+        name: "vault-body",
         ok: false,
-        message: `cannot decode metadata body: ${message}`,
+        message: `cannot open vault: ${message}`,
       });
     }
   }
-
-  // Touch the file once so the unused-import lint doesn't complain when no
-  // child check references stat() directly (the magic check already used it
-  // via Bun.file). Keep stat imported in case future checks need it.
-  void stat;
 
   const ok = checks.every((c) => c.ok);
   return { ok, checks };
