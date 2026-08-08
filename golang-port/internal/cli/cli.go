@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/app"
+	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/autonomous"
 	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/config"
 	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/doctor"
 	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/initcmd"
@@ -39,6 +40,7 @@ Auxiliary commands:
   dump-registry list  List indexed dumps with SHA-256
   dump-registry scan  Index existing dumps under dumps/
   restore-history list  List restore operations
+  autonomous            Run scheduled backups (cron + optional S3 upload)
   config {init|validate|lint}`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return handleMain(configPath, yes, debug, "", "", "", "")
@@ -54,6 +56,7 @@ Auxiliary commands:
 	addSecretCommands(root, &configPath, &yes)
 	addConfigCommands(root, &configPath)
 	addInspectCommands(root, &configPath)
+	addAutonomousCommand(root, &configPath, &debug)
 
 	return root
 }
@@ -408,4 +411,32 @@ func loadConfigOrExit(path, outro string) (*config.Config, error) {
 		os.Exit(1)
 	}
 	return cfg, nil
+}
+
+func addAutonomousCommand(root *cobra.Command, configPath *string, debug *bool) {
+	var once bool
+	cmd := &cobra.Command{
+		Use:   "autonomous",
+		Short: "Run scheduled backups from config autonomous.schedules (cron + optional S3)",
+		Long: `Run scheduled backups from config autonomous.schedules (cron + optional S3).
+
+Unlocks the vault with DUMPMGR_MASTER_PASSWORD when rememberPassword, encryptedDump,
+or s3Options are enabled. S3 secret key can come from the vault or DUMPMGR_S3_SECRET_KEY.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Println("dumpmgr autonomous")
+			if err := autonomous.Run(autonomous.Options{
+				ConfigPath: *configPath,
+				Debug:      *debug,
+				Once:       once,
+			}); err != nil {
+				fmt.Printf("✗ %v\n", err)
+				return err
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(configPath, "config", "c", config.DefaultConfigPath, "Path to config.jsonc")
+	cmd.Flags().BoolVar(debug, "debug", false, "Print docker/DB commands being executed")
+	cmd.Flags().BoolVar(&once, "once", false, "Run all schedules immediately and exit")
+	root.AddCommand(cmd)
 }
