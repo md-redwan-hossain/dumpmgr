@@ -53,12 +53,34 @@ export const S3OptionsSchema = z
 
 export type S3Options = z.infer<typeof S3OptionsSchema>;
 
+export const AutonomousScheduleSchema = z
+  .object({
+    /** Cron expression (e.g. "0 2 * * *" for daily at 02:00). */
+    cron: z.string().min(1),
+    /** Item keys to dump; omit or empty to dump all configured items. */
+    items: z.array(z.string().min(1)).optional(),
+    /** Upload each dump to S3 after creation (requires s3Options). */
+    uploadToS3: z.boolean().default(false),
+  })
+  .strict();
+
+export type AutonomousSchedule = z.infer<typeof AutonomousScheduleSchema>;
+
+export const AutonomousOptionsSchema = z
+  .object({
+    schedules: z.array(AutonomousScheduleSchema).min(1),
+  })
+  .strict();
+
+export type AutonomousOptions = z.infer<typeof AutonomousOptionsSchema>;
+
 export const ConfigSchema = z.object({
   rememberPassword: z.boolean().default(true),
   encryptedDump: z.boolean().default(false),
   dumpDirectory: z.string().default("."),
   image: z.string().min(1).optional(),
   s3Options: S3OptionsSchema.optional(),
+  autonomous: AutonomousOptionsSchema.optional(),
   items: z.record(z.string(), DatabaseEntrySchema).default({}),
 });
 
@@ -241,6 +263,31 @@ export async function readConfigFile(path: string): Promise<unknown> {
   }
 }
 
+export function validateEncryptedDumpPolicy(config: Config): string | null {
+  if (config.encryptedDump && !config.rememberPassword) {
+    return (
+      'encryptedDump requires rememberPassword: true (encrypted dumps need the master-derived AES key)'
+    );
+  }
+  return null;
+}
+
+export function findDatabaseItem(
+  config: Config,
+  key: string,
+): DatabaseItem | null {
+  return configItems(config).find((item) => item.key === key) ?? null;
+}
+
+export function findRestoreDestination(
+  config: Config,
+  key: string,
+): DatabaseItem | null {
+  const item = configRestoreTreeItems(config).find((i) => i.key === key);
+  if (!item || item.disabled) return null;
+  return item;
+}
+
 export async function loadConfigAsync(path: string): Promise<Config> {
   const raw = await readConfigFile(path);
   const result = ConfigSchema.safeParse(raw);
@@ -249,6 +296,11 @@ export async function loadConfigAsync(path: string): Promise<Config> {
       .map((i) => `  - ${i.path.join(".") || "(root)"}: ${i.message}`)
       .join("\n");
     throw new Error(`Invalid config (${path}):\n${details}`);
+  }
+
+  const policyError = validateEncryptedDumpPolicy(result.data);
+  if (policyError) {
+    throw new Error(`Invalid config (${path}):\n  - ${policyError}`);
   }
 
   return result.data;
@@ -295,6 +347,11 @@ export async function validateConfigFile(
   }
 
   const config = result.data;
+  const policyError = validateEncryptedDumpPolicy(config);
+  if (policyError) {
+    return { ok: false, issues: [policyError] };
+  }
+
   const image = configImage(config);
   const entries = Object.entries(config.items);
   const nestedCount = entries.reduce(
@@ -308,6 +365,7 @@ export async function validateConfigFile(
     `encryptedDump: ${config.encryptedDump}`,
     `dumpDirectory: ${config.dumpDirectory}`,
     `s3Options: ${config.s3Options ? `${config.s3Options.endpoint}/${config.s3Options.bucketName}` : "disabled"}`,
+    `autonomous: ${config.autonomous ? `${config.autonomous.schedules.length} schedule(s)` : "disabled"}`,
     "",
     `image=${image}  parents=${entries.length}  nested=${nestedCount}`,
   ];

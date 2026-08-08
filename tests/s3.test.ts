@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   localPathForS3Object,
   s3ObjectKey,
-} from "./s3.ts";
+} from "../src/s3.ts";
 
 describe("S3 object paths", () => {
   test("uses forward-slash keys relative to the dumps root", () => {

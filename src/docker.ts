@@ -1,4 +1,4 @@
-import { cpus } from "node:os";
+import { cpus, platform } from "node:os";
 import { resolve } from "node:path";
 import type { DatabaseItem } from "./config.ts";
 
@@ -107,14 +107,27 @@ async function runDocker(
   return { exitCode, stdout, stderr };
 }
 
+function needsHostGateway(host: string): boolean {
+  return platform() === "linux" && dockerHost(host) === "host.docker.internal";
+}
+
+export function dockerRunHostArgs(host: string): string[] {
+  if (needsHostGateway(host)) {
+    return ["--add-host", "host.docker.internal:host-gateway"];
+  }
+  return [];
+}
+
 function pgBaseArgs(
   image: string,
   password: string,
   volume?: string,
+  dbHost?: string,
 ): string[] {
   const args = ["run", "--rm", "-e", `PGPASSWORD=${password}`];
   const network = process.env.DUMPMGR_DOCKER_NETWORK;
   if (network) args.push("--network", network);
+  if (dbHost) args.push(...dockerRunHostArgs(dbHost));
   if (volume) args.push("-v", volume);
   args.push(image);
   return args;
@@ -135,7 +148,7 @@ export async function verifyConnection(
   const database = opts?.database ?? db.database;
 
   const args = [
-    ...pgBaseArgs(image, db.password),
+    ...pgBaseArgs(image, db.password, undefined, db.host),
     "psql",
     "--host",
     host,
@@ -166,7 +179,7 @@ export async function databaseExists(
 
   const sql = `SELECT 1 FROM pg_database WHERE datname='${db.database.replaceAll("'", "''")}'`;
   const args = [
-    ...pgBaseArgs(image, db.password),
+    ...pgBaseArgs(image, db.password, undefined, db.host),
     "psql",
     "--host",
     host,
@@ -198,7 +211,7 @@ export async function createDatabase(
 
   const sql = `CREATE DATABASE ${quoteIdent(db.database)}`;
   const args = [
-    ...pgBaseArgs(image, db.password),
+    ...pgBaseArgs(image, db.password, undefined, db.host),
     "psql",
     "--host",
     host,
@@ -234,7 +247,7 @@ export async function dropDatabase(
   const drop = `DROP DATABASE IF EXISTS ${quoteIdent(db.database)}`;
   for (const sql of [terminate, drop]) {
     const args = [
-      ...pgBaseArgs(image, db.password),
+      ...pgBaseArgs(image, db.password, undefined, db.host),
       "psql",
       "--host",
       host,
@@ -294,7 +307,7 @@ export async function ensureDatabaseLogin(
     [grantSchema, opts.database],
   ] as const) {
     const args = [
-      ...pgBaseArgs(image, parentDb.password),
+      ...pgBaseArgs(image, parentDb.password, undefined, parentDb.host),
       "psql",
       "--host",
       host,
@@ -333,7 +346,7 @@ export async function dumpDatabase(
   const out = `/backup/${dumpFileName}`;
 
   const args = [
-    ...pgBaseArgs(image, db.password, volume),
+    ...pgBaseArgs(image, db.password, volume, db.host),
     "pg_dump",
     `--host=${host}`,
     `--port=${db.port}`,
@@ -365,7 +378,7 @@ export async function restoreDatabase(
   const clean = opts?.clean ?? false;
 
   const args = [
-    ...pgBaseArgs(image, db.password, volume),
+    ...pgBaseArgs(image, db.password, volume, db.host),
     "pg_restore",
     `--host=${host}`,
     `--port=${db.port}`,

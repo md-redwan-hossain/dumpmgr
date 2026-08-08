@@ -9,13 +9,16 @@
   "scripts": {
     "dumpmgr": "bun run src/index.ts",
     "test": "bun run test:unit",
-    "test:unit": "bun test tests",
+    "test:unit": "bun test tests/*.test.ts",
+    "test:integration": "bun test tests/integration --timeout 120000 --concurrency 1",
+    "test:all": "bun run test:unit && bun run test:integration",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@clack/prompts": "^1.7.0",
     "commander": "^15.0.0",
     "comment-json": "^5.0.0",
+    "croner": "^10.0.1",
     "hash-wasm": "^4.12.0",
     "ora": "^9.4.1",
     "zod": "^4.4.3"

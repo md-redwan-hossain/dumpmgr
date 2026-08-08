@@ -114,6 +114,26 @@ describe("config", () => {
     expect(result.success).toBe(false);
   });
 
+  test("rejects encryptedDump without rememberPassword", async () => {
+    await withTempDir(async (directory) => {
+      const path = `${directory}/config.jsonc`;
+      await Bun.write(
+        path,
+        JSON.stringify({
+          rememberPassword: false,
+          encryptedDump: true,
+          items: {},
+        }),
+      );
+      await expect(loadConfigAsync(path)).rejects.toThrow(/encryptedDump requires rememberPassword/);
+      const result = await validateConfigFile(path);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.issues[0]).toMatch(/encryptedDump requires rememberPassword/);
+      }
+    });
+  });
+
   test("loads JSONC and returns validation warnings", async () => {
     await withTempDir(async (directory) => {
       const path = `${directory}/config.jsonc`;
