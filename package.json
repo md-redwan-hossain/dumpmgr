@@ -9,7 +9,9 @@
   "scripts": {
     "dumpmgr": "bun run src/index.ts",
     "test": "bun run test:unit",
-    "test:unit": "bun test tests",
+    "test:unit": "bun test tests/*.test.ts",
+    "test:integration": "bun test tests/integration --timeout 120000 --concurrency 1",
+    "test:all": "bun run test:unit && bun run test:integration",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
