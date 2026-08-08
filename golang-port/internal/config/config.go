@@ -34,12 +34,23 @@ type S3Options struct {
 	ForcePathStyle          bool   `json:"forcePathStyle"`
 }
 
+type AutonomousSchedule struct {
+	Cron       string   `json:"cron"`
+	Items      []string `json:"items,omitempty"`
+	UploadToS3 bool     `json:"uploadToS3"`
+}
+
+type AutonomousOptions struct {
+	Schedules []AutonomousSchedule `json:"schedules"`
+}
+
 type Config struct {
 	RememberPassword bool                       `json:"rememberPassword"`
 	EncryptedDump    bool                       `json:"encryptedDump"`
 	DumpDirectory    string                     `json:"dumpDirectory"`
 	Image            string                     `json:"image,omitempty"`
 	S3Options        *S3Options                 `json:"s3Options,omitempty"`
+	Autonomous       *AutonomousOptions         `json:"autonomous,omitempty"`
 	Items            map[string]DatabaseEntry   `json:"items"`
 }
 
@@ -267,6 +278,9 @@ func ValidateConfig(cfg *Config) []string {
 			issues = append(issues, "s3Options.bucketName: required")
 		}
 	}
+	if cfg.Autonomous != nil && len(cfg.Autonomous.Schedules) == 0 {
+		issues = append(issues, "autonomous.schedules: must contain at least one entry")
+	}
 	return issues
 }
 
@@ -303,12 +317,17 @@ func BuildValidateReport(cfg *Config) ValidateResult {
 	if cfg.S3Options != nil {
 		s3Line = fmt.Sprintf("%s/%s", cfg.S3Options.Endpoint, cfg.S3Options.BucketName)
 	}
+	autonomousLine := "disabled"
+	if cfg.Autonomous != nil {
+		autonomousLine = fmt.Sprintf("%d schedule(s)", len(cfg.Autonomous.Schedules))
+	}
 
 	report := []string{
 		fmt.Sprintf("rememberPassword: %v", cfg.RememberPassword),
 		fmt.Sprintf("encryptedDump: %v", cfg.EncryptedDump),
 		fmt.Sprintf("dumpDirectory: %s", cfg.DumpDirectory),
 		fmt.Sprintf("s3Options: %s", s3Line),
+		fmt.Sprintf("autonomous: %s", autonomousLine),
 		"",
 		fmt.Sprintf("image=%s  parents=%d  nested=%d", image, len(entries), nestedCount),
 	}
