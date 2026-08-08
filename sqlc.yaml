@@ -1,0 +1,11 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    queries: "src/internal/vault/queries"
+    schema: "src/internal/vault/schema.sql"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "src/internal/vault/sqlcgen"
+        emit_empty_slices: true
+        sql_package: "database/sql"
