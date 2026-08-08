@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
 	"time"
 
@@ -185,7 +186,7 @@ func addDumpRegistryCommands(root *cobra.Command, configPath *string) {
 				return fmt.Errorf("dump not indexed: %s", args[0])
 			}
 			abs := dumps.ResolveRoot(cfg.DumpDirectory)
-			full := fmt.Sprintf("%s/%s", abs, args[0])
+			full := filepath.Join(abs, filepath.FromSlash(args[0]))
 			hash, size, err := vault.SHA256File(full)
 			if err != nil {
 				return err

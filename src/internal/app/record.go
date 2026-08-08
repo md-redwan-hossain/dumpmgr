@@ -39,7 +39,10 @@ func recordRestore(session *metadata.Session, dumpsRoot, absPath, destKey string
 	if session == nil || session.Store == nil {
 		return
 	}
-	rel, _ := vault.RelativeDumpPath(dumpsRoot, absPath)
+	rel, err := vault.RelativeDumpPath(dumpsRoot, absPath)
+	if err != nil || rel == "" {
+		rel = filepath.Base(absPath)
+	}
 	hash, _, _ := vault.SHA256File(absPath)
 	var dumpID *int64
 	if rec, _ := session.Store.GetDumpByPath(rel); rec != nil {

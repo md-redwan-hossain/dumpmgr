@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 
 	"github.com/md-redwan-hossain/dumpmgr/src/internal/hujson"
-	"github.com/tidwall/jsonc"
 )
 
 func Exists(path string) bool {
@@ -79,20 +78,16 @@ func ValidateFile(path string) ValidateResult {
 	if err != nil {
 		return ValidateResult{OK: false, Issues: []string{err.Error()}}
 	}
-	standard := jsonc.ToJSON(data)
-	var cfg Config
-	if err := json.Unmarshal(standard, &cfg); err != nil {
-		return ValidateResult{OK: false, Issues: []string{fmt.Sprintf("invalid JSONC: %v", err)}}
-	}
-	ApplyDefaults(&cfg)
-	if err := ValidateEncryptedDumpPolicy(&cfg); err != nil {
+	cfg, err := ParseJSONC(data)
+	if err != nil {
 		return ValidateResult{OK: false, Issues: []string{err.Error()}}
 	}
-	if issues := ValidateConfig(&cfg); len(issues) > 0 {
-		return ValidateResult{OK: false, Issues: issues}
+	if err := ValidateEncryptedDumpPolicy(cfg); err != nil {
+		return ValidateResult{OK: false, Issues: []string{err.Error()}}
 	}
-	result := BuildValidateReport(&cfg)
+	result := BuildValidateReport(cfg)
 	result.OK = true
+	result.Config = cfg
 	return result
 }
 

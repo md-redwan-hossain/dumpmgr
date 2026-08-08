@@ -66,6 +66,16 @@ func TestAutonomousRejectsEmptySchedules(t *testing.T) {
 	}
 }
 
+func TestAutonomousRejectsEmptyCron(t *testing.T) {
+	_, err := config.ParseJSONC([]byte(`{
+		"autonomous": { "schedules": [{ "cron": "" }] },
+		"items": {}
+	}`))
+	if err == nil {
+		t.Fatal("expected validation error for empty cron")
+	}
+}
+
 func TestAutonomousOptionalInConfig(t *testing.T) {
 	cfg := mustParse(t, `{
 		"autonomous": {

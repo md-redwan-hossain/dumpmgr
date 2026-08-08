@@ -64,4 +64,15 @@ func TestFindDatabaseItemAndRestoreDestination(t *testing.T) {
 	if config.FindRestoreDestination(&cfg, "missing") != nil {
 		t.Fatal("expected nil for unknown key")
 	}
+
+	readonly := mustParse(t, `{
+		"items": {
+			"locked": {
+				"host": "db", "port": 5432, "user": "admin", "database": "app", "readonly": true
+			}
+		}
+	}`)
+	if config.FindRestoreDestination(readonly, "locked") != nil {
+		t.Fatal("expected nil for readonly restore dest")
+	}
 }

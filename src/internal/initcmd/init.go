@@ -130,8 +130,7 @@ func promptNewMasterPair() (string, error) {
 		return "", err
 	}
 	if confirm != master {
-		fmt.Println("Master passwords do not match.")
-		os.Exit(1)
+		return "", fmt.Errorf("master passwords do not match")
 	}
 	return master, nil
 }

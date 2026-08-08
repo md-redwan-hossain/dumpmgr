@@ -284,16 +284,9 @@ func ensureDestDatabase(cfg *config.Config, dest docker.ResolvedDB, destName str
 }
 
 func handleChangeMaster(cfg *config.Config, session *metadata.Session) (*metadata.Session, error) {
-	next, err := prompt.Password("new master password")
+	next, err := prompt.ConfirmedPassword("new master password")
 	if err != nil {
 		return nil, err
-	}
-	confirm, err := prompt.Password("confirm new master password")
-	if err != nil {
-		return nil, err
-	}
-	if next != confirm {
-		return nil, fmt.Errorf("master passwords do not match")
 	}
 
 	oldKey := session.AESKey
@@ -598,7 +591,10 @@ func RunMain(opts Options) error {
 	if !config.Exists(configPath) {
 		fmt.Printf("✗ Config file not found: %s\n", configPath)
 		choice, err := prompt.SelectInitChoice()
-		if err != nil || choice == "abort" {
+		if err != nil {
+			return err
+		}
+		if choice == "abort" {
 			prompt.OnCancel()
 		}
 		withFake := choice == "fake"

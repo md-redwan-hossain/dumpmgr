@@ -1,6 +1,7 @@
 package prompt
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,7 +12,6 @@ import (
 	"github.com/md-redwan-hossain/dumpmgr/src/internal/dumps"
 	"github.com/md-redwan-hossain/dumpmgr/src/internal/metadata"
 	"github.com/md-redwan-hossain/dumpmgr/src/internal/s3"
-	"golang.org/x/term"
 )
 
 type Mode string
@@ -48,19 +48,30 @@ func OnCancel() {
 	os.Exit(0)
 }
 
+// runForm runs a huh form. User abort exits like clack cancel; other errors return.
+func runForm(form *huh.Form) error {
+	if err := form.Run(); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			OnCancel()
+		}
+		return err
+	}
+	return nil
+}
+
 func SelectMode(cfg *config.Config) (Mode, error) {
 	options := []huh.Option[Mode]{
-		huh.NewOption("Take dump — Write dump file only", ModeDump),
-		huh.NewOption("Restore from dump — Pick a dump file → destination", ModeRestore),
-		huh.NewOption("Take dump and restore — Copy source → destination", ModeDumpRestore),
+		huh.NewOption("Take dump", ModeDump),
+		huh.NewOption("Restore from dump", ModeRestore),
+		huh.NewOption("Take dump and restore", ModeDumpRestore),
 	}
 	if config.NeedsMaster(cfg) {
-		options = append(options, huh.NewOption("Change master password — Rotate master + re-encrypt secrets", ModeChangeMaster))
+		options = append(options, huh.NewOption("Change master password", ModeChangeMaster))
 	}
 	if cfg.S3Options != nil {
 		options = append(options,
-			huh.NewOption("Upload dump to S3 — Copy a local dump to the configured bucket", ModeS3Upload),
-			huh.NewOption("Download dump from S3 — Browse objects and download one locally", ModeS3Download),
+			huh.NewOption("Upload dump to S3", ModeS3Upload),
+			huh.NewOption("Download dump from S3", ModeS3Download),
 		)
 	}
 	options = append(options, huh.NewOption("Exit", ModeExit))
@@ -69,11 +80,12 @@ func SelectMode(cfg *config.Config) (Mode, error) {
 	form := huh.NewForm(huh.NewGroup(
 		huh.NewSelect[Mode]().
 			Title("What do you want to do?").
+			Description("Dump / restore Postgres via Docker").
 			Options(options...).
 			Value(&choice),
 	))
-	if err := form.Run(); err != nil {
-		OnCancel()
+	if err := runForm(form); err != nil {
+		return "", err
 	}
 	return choice, nil
 }
@@ -102,15 +114,15 @@ func SelectDatabaseItem(items []config.DatabaseItem, message string, exclude str
 	options := make([]huh.Option[string], len(list))
 	lookup := make(map[string]config.DatabaseItem)
 	for i, db := range list {
-		options[i] = huh.NewOption(fmt.Sprintf("%s — %s", db.Key, itemHint(db)), db.Key)
+		options[i] = huh.NewOption(fmt.Sprintf("%s (%s)", db.Key, itemHint(db)), db.Key)
 		lookup[db.Key] = db
 	}
 	var choice string
 	form := huh.NewForm(huh.NewGroup(
 		huh.NewSelect[string]().Title(message).Options(options...).Value(&choice),
 	))
-	if err := form.Run(); err != nil {
-		OnCancel()
+	if err := runForm(form); err != nil {
+		return config.DatabaseItem{}, err
 	}
 	return lookup[choice], nil
 }
@@ -119,9 +131,10 @@ func SelectDatabaseTree(cfg *config.Config, message, exclude string) (config.Dat
 	tree := config.ConfigRestoreTreeItems(cfg)
 	var filtered []config.TreeDatabaseOption
 	for _, item := range tree {
-		if item.Key != exclude {
-			filtered = append(filtered, item)
+		if item.Key == exclude || item.Disabled {
+			continue
 		}
+		filtered = append(filtered, item)
 	}
 	if len(filtered) == 0 {
 		return config.DatabaseItem{}, fmt.Errorf("no databases available to select")
@@ -134,25 +147,17 @@ func SelectDatabaseTree(cfg *config.Config, message, exclude string) (config.Dat
 			parts := strings.Split(db.Key, ":")
 			leaf = "  └ " + parts[len(parts)-1]
 		}
-		label := fmt.Sprintf("%s — %s", leaf, itemHint(db.DatabaseItem))
-		if db.Disabled {
-			label += " (readonly)"
-		}
-		options = append(options, huh.NewOption(label, db.Key))
+		options = append(options, huh.NewOption(fmt.Sprintf("%s (%s)", leaf, itemHint(db.DatabaseItem)), db.Key))
 		lookup[db.Key] = db
 	}
 	var choice string
 	form := huh.NewForm(huh.NewGroup(
 		huh.NewSelect[string]().Title(message).Options(options...).Value(&choice),
 	))
-	if err := form.Run(); err != nil {
-		OnCancel()
+	if err := runForm(form); err != nil {
+		return config.DatabaseItem{}, err
 	}
-	selected := lookup[choice]
-	if selected.Disabled {
-		return config.DatabaseItem{}, fmt.Errorf("%q is readonly and cannot be a restore destination", selected.Key)
-	}
-	return selected.DatabaseItem, nil
+	return lookup[choice].DatabaseItem, nil
 }
 
 // ResolveDatabaseItem returns the item for key when set, otherwise prompts interactively.
@@ -177,11 +182,16 @@ func ResolveDatabaseTree(cfg *config.Config, key, message, exclude string) (conf
 		if key == exclude {
 			return config.DatabaseItem{}, fmt.Errorf(`cannot use %q as source/destination`, key)
 		}
-		item := config.FindRestoreDestination(cfg, key)
-		if item == nil {
-			return config.DatabaseItem{}, fmt.Errorf(`unknown database %q. Check config.jsonc items`, key)
+		for _, opt := range config.ConfigRestoreTreeItems(cfg) {
+			if opt.Key != key {
+				continue
+			}
+			if opt.Disabled {
+				return config.DatabaseItem{}, fmt.Errorf("%q is readonly and cannot be a restore destination", key)
+			}
+			return opt.DatabaseItem, nil
 		}
-		return *item, nil
+		return config.DatabaseItem{}, fmt.Errorf(`unknown database %q. Check config.jsonc items`, key)
 	}
 	return SelectDatabaseTree(cfg, message, exclude)
 }
@@ -191,13 +201,16 @@ func Password(message string) (string, error) {
 	if !strings.HasPrefix(message, "Enter ") {
 		labeled = "Enter " + message
 	}
-	fmt.Printf("%s: ", labeled)
-	b, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
-	if err != nil {
+	var pw string
+	form := huh.NewForm(huh.NewGroup(
+		huh.NewInput().
+			Title(labeled).
+			EchoMode(huh.EchoModePassword).
+			Value(&pw),
+	))
+	if err := runForm(form); err != nil {
 		return "", err
 	}
-	pw := string(b)
 	if pw == "" {
 		fmt.Println("Password is required.")
 		os.Exit(1)
@@ -216,8 +229,8 @@ func ConfirmOrYes(message string, yes bool, initialValue bool) (bool, error) {
 	form := huh.NewForm(huh.NewGroup(
 		huh.NewConfirm().Title(message).Value(&result).Affirmative("Yes").Negative("No"),
 	))
-	if err := form.Run(); err != nil {
-		OnCancel()
+	if err := runForm(form); err != nil {
+		return false, err
 	}
 	return result, nil
 }
@@ -240,8 +253,8 @@ func SelectNestedRestoreAction(message string, childExists bool) (NestedRestoreA
 	form := huh.NewForm(huh.NewGroup(
 		huh.NewSelect[NestedRestoreAction]().Title(message).Options(options...).Value(&choice),
 	))
-	if err := form.Run(); err != nil {
-		OnCancel()
+	if err := runForm(form); err != nil {
+		return "", err
 	}
 	return choice, nil
 }
@@ -260,8 +273,8 @@ func SelectReplaceExistingObjects(yes bool) (bool, error) {
 			).
 			Value(&choice),
 	))
-	if err := form.Run(); err != nil {
-		OnCancel()
+	if err := runForm(form); err != nil {
+		return false, err
 	}
 	return choice, nil
 }
@@ -278,8 +291,8 @@ func SelectNestedCreatePassword(hasSaved bool) (NestedCreatePasswordSource, erro
 	form := huh.NewForm(huh.NewGroup(
 		huh.NewSelect[NestedCreatePasswordSource]().Title("Password for new database?").Options(options...).Value(&choice),
 	))
-	if err := form.Run(); err != nil {
-		OnCancel()
+	if err := runForm(form); err != nil {
+		return "", err
 	}
 	return choice, nil
 }
@@ -344,7 +357,10 @@ func ConnectWithRetry(label string, getPassword func() (string, error), setPassw
 				).
 				Value(&action),
 		))
-		if err := form.Run(); err != nil || action == "abort" {
+		if err := runForm(form); err != nil {
+			return "", err
+		}
+		if action == "abort" {
 			OnCancel()
 		}
 		if action == "change" {
@@ -395,8 +411,8 @@ func BrowseDumpFile(rootDir string, encryptedOnly bool) (string, error) {
 		form := huh.NewForm(huh.NewGroup(
 			huh.NewSelect[string]().Title(fmt.Sprintf("Browse dumps (%s)", rel)).Options(options...).Value(&choice),
 		))
-		if err := form.Run(); err != nil {
-			OnCancel()
+		if err := runForm(form); err != nil {
+			return "", err
 		}
 		if choice == ".." {
 			cwd = filepath.Dir(cwd)
@@ -421,14 +437,14 @@ func SelectS3Object(objects []s3.Object) (string, error) {
 	}
 	options := make([]huh.Option[string], len(objects))
 	for i, obj := range objects {
-		options[i] = huh.NewOption(fmt.Sprintf("%s — %s", obj.Key, s3.FormatObject(obj)), obj.Key)
+		options[i] = huh.NewOption(fmt.Sprintf("%s (%s)", obj.Key, s3.FormatObject(obj)), obj.Key)
 	}
 	var choice string
 	form := huh.NewForm(huh.NewGroup(
 		huh.NewSelect[string]().Title("Select an S3 dump object").Options(options...).Value(&choice),
 	))
-	if err := form.Run(); err != nil {
-		OnCancel()
+	if err := runForm(form); err != nil {
+		return "", err
 	}
 	return choice, nil
 }
@@ -445,8 +461,8 @@ func SelectInitChoice() (string, error) {
 			).
 			Value(&choice),
 	))
-	if err := form.Run(); err != nil {
-		OnCancel()
+	if err := runForm(form); err != nil {
+		return "", err
 	}
 	return choice, nil
 }
@@ -455,15 +471,15 @@ func SelectMasterAction() (string, error) {
 	var action string
 	form := huh.NewForm(huh.NewGroup(
 		huh.NewSelect[string]().
-			Title("Existing master password found in metadata").
+			Title("Existing master password found in vault").
 			Options(
 				huh.NewOption("Change master password", "change"),
 				huh.NewOption("Continue with existing master password", "continue"),
 			).
 			Value(&action),
 	))
-	if err := form.Run(); err != nil {
-		OnCancel()
+	if err := runForm(form); err != nil {
+		return "", err
 	}
 	return action, nil
 }
@@ -479,8 +495,8 @@ func SelectEncryptedDumpAction() (string, error) {
 			).
 			Value(&action),
 	))
-	if err := form.Run(); err != nil {
-		OnCancel()
+	if err := runForm(form); err != nil {
+		return "", err
 	}
 	return action, nil
 }
@@ -488,10 +504,10 @@ func SelectEncryptedDumpAction() (string, error) {
 func ConfirmOverwrite(path string) (bool, error) {
 	var ok bool
 	form := huh.NewForm(huh.NewGroup(
-		huh.NewConfirm().Title(fmt.Sprintf("%s already exists. Overwrite?", path)).Value(&ok),
+		huh.NewConfirm().Title(fmt.Sprintf("%s already exists. Overwrite?", path)).Value(&ok).Affirmative("Yes").Negative("No"),
 	))
-	if err := form.Run(); err != nil {
-		OnCancel()
+	if err := runForm(form); err != nil {
+		return false, err
 	}
 	return ok, nil
 }
@@ -499,10 +515,10 @@ func ConfirmOverwrite(path string) (bool, error) {
 func ConfirmWipeSecret(key string) (bool, error) {
 	var ok bool
 	form := huh.NewForm(huh.NewGroup(
-		huh.NewConfirm().Title(fmt.Sprintf(`Remove saved password for "%s"?`, key)).Value(&ok),
+		huh.NewConfirm().Title(fmt.Sprintf(`Remove saved password for "%s"?`, key)).Value(&ok).Affirmative("Yes").Negative("No"),
 	))
-	if err := form.Run(); err != nil {
-		OnCancel()
+	if err := runForm(form); err != nil {
+		return false, err
 	}
 	return ok, nil
 }
@@ -510,10 +526,10 @@ func ConfirmWipeSecret(key string) (bool, error) {
 func ConfirmInitOverwrite(path string) (bool, error) {
 	var ok bool
 	form := huh.NewForm(huh.NewGroup(
-		huh.NewConfirm().Title(fmt.Sprintf("%s already exists. Overwrite?", path)).Value(&ok),
+		huh.NewConfirm().Title(fmt.Sprintf("%s already exists. Overwrite?", path)).Value(&ok).Affirmative("Yes").Negative("No"),
 	))
-	if err := form.Run(); err != nil {
-		OnCancel()
+	if err := runForm(form); err != nil {
+		return false, err
 	}
 	return ok, nil
 }
@@ -521,21 +537,21 @@ func ConfirmInitOverwrite(path string) (bool, error) {
 func ConfirmFakeData() (bool, error) {
 	var ok bool
 	form := huh.NewForm(huh.NewGroup(
-		huh.NewConfirm().Title("Populate with dummy data?").Value(&ok),
+		huh.NewConfirm().Title("Populate with dummy data?").Value(&ok).Affirmative("Yes").Negative("No"),
 	))
-	if err := form.Run(); err != nil {
-		OnCancel()
+	if err := runForm(form); err != nil {
+		return false, err
 	}
 	return ok, nil
 }
 
 func TryAgain() (bool, error) {
-	var ok bool
+	ok := true
 	form := huh.NewForm(huh.NewGroup(
-		huh.NewConfirm().Title("Try again?").Value(&ok),
+		huh.NewConfirm().Title("Try again?").Value(&ok).Affirmative("Yes").Negative("No"),
 	))
-	if err := form.Run(); err != nil {
-		OnCancel()
+	if err := runForm(form); err != nil {
+		return false, err
 	}
 	return ok, nil
 }

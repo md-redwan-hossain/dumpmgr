@@ -22,6 +22,7 @@ func rootCmd() *cobra.Command {
 	var configPath string
 	var yes bool
 	var debug bool
+	var source, dest, dump string
 
 	root := &cobra.Command{
 		Use:   "dumpmgr",
@@ -43,12 +44,15 @@ Auxiliary commands:
   autonomous            Run scheduled backups (cron + optional S3 upload)
   config {init|validate|lint}`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return handleMain(configPath, yes, debug, "", "", "", "")
+			return handleMain(configPath, yes, debug, "", source, dest, dump)
 		},
 	}
 	root.Flags().StringVarP(&configPath, "config", "c", config.DefaultConfigPath, "Path to config.jsonc")
 	root.Flags().BoolVar(&yes, "yes", false, "Skip confirms; auto-create missing dest DB")
 	root.Flags().BoolVar(&debug, "debug", false, "Print docker/DB commands being executed")
+	root.Flags().StringVar(&source, "source", "", "Database item key to dump (skip picker)")
+	root.Flags().StringVar(&dest, "dest", "", "Destination database item key (skip picker)")
+	root.Flags().StringVar(&dump, "dump", "", "Path to dump file (skip browser)")
 
 	addModeCommands(root, &configPath, &yes, &debug)
 	addS3Commands(root, &configPath, &yes)
@@ -248,6 +252,7 @@ func addSecretCommands(root *cobra.Command, configPath *string, yes *bool) {
 				return err
 			}
 			if session == nil {
+				fmt.Println("no history")
 				return nil
 			}
 			defer session.Close()

@@ -278,8 +278,15 @@ func ValidateConfig(cfg *Config) []string {
 			issues = append(issues, "s3Options.bucketName: required")
 		}
 	}
-	if cfg.Autonomous != nil && len(cfg.Autonomous.Schedules) == 0 {
-		issues = append(issues, "autonomous.schedules: must contain at least one entry")
+	if cfg.Autonomous != nil {
+		if len(cfg.Autonomous.Schedules) == 0 {
+			issues = append(issues, "autonomous.schedules: must contain at least one entry")
+		}
+		for i, sched := range cfg.Autonomous.Schedules {
+			if strings.TrimSpace(sched.Cron) == "" {
+				issues = append(issues, fmt.Sprintf("autonomous.schedules[%d].cron: required", i))
+			}
+		}
 	}
 	return issues
 }

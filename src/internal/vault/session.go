@@ -178,12 +178,16 @@ func ChangeMasterPassword(session *Session, newMaster string) (*Session, error) 
 	if encID == "" {
 		encID = NewEncID()
 	}
-	var s3Plain string
-	if sk, err := GetS3SecretKey(session); err == nil {
-		s3Plain = sk
+	_, _, _, s3Cipher, err := session.Store.VaultMeta()
+	if err != nil {
+		return nil, err
 	}
 	var s3Enc *string
-	if s3Plain != "" {
+	if s3Cipher.Valid {
+		s3Plain, err := crypto.DecryptSecret(session.AESKey, s3Cipher.String)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt S3 secret key: %w", err)
+		}
 		enc, err := crypto.EncryptSecret(newKey, s3Plain)
 		if err != nil {
 			return nil, err

@@ -132,6 +132,45 @@ func TestLoadJSONCAndValidateWarnings(t *testing.T) {
 	}
 }
 
+func TestS3BoolDefaultsWhenOmitted(t *testing.T) {
+	cfg := mustParse(t, `{
+		"s3Options": {
+			"endpoint": "https://s3.example.com",
+			"accessKey": "key",
+			"bucketName": "bucket"
+		},
+		"items": {}
+	}`)
+	if cfg.S3Options == nil {
+		t.Fatal("expected s3Options")
+	}
+	if !cfg.S3Options.UseHTTPS {
+		t.Fatal("expected useHttps default true")
+	}
+	if !cfg.S3Options.ForcePathStyle {
+		t.Fatal("expected forcePathStyle default true")
+	}
+}
+
+func TestS3BoolExplicitFalsePreserved(t *testing.T) {
+	cfg := mustParse(t, `{
+		"s3Options": {
+			"endpoint": "http://127.0.0.1:9000",
+			"accessKey": "key",
+			"bucketName": "bucket",
+			"useHttps": false,
+			"forcePathStyle": false
+		},
+		"items": {}
+	}`)
+	if cfg.S3Options.UseHTTPS {
+		t.Fatal("expected explicit useHttps false")
+	}
+	if cfg.S3Options.ForcePathStyle {
+		t.Fatal("expected explicit forcePathStyle false")
+	}
+}
+
 func TestWriteAndLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.jsonc")

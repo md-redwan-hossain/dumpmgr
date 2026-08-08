@@ -49,6 +49,14 @@ func parseConfigJSON(data string) (*Config, error) {
 	if _, ok := raw["rememberPassword"]; !ok {
 		cfg.RememberPassword = true
 	}
+	if s3raw, ok := raw["s3Options"].(map[string]any); ok && cfg.S3Options != nil {
+		if _, ok := s3raw["useHttps"]; !ok {
+			cfg.S3Options.UseHTTPS = true
+		}
+		if _, ok := s3raw["forcePathStyle"]; !ok {
+			cfg.S3Options.ForcePathStyle = true
+		}
+	}
 	ApplyDefaults(&cfg)
 	if issues := ValidateConfig(&cfg); len(issues) > 0 {
 		return nil, &validationError{message: issues[0]}
