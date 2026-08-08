@@ -3,6 +3,7 @@ package s3
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -10,9 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/md-redwan-hossain/dumpmgr/golang-port/internal/config"
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 type Object struct {
@@ -37,22 +39,21 @@ func endpointFor(opts config.S3Options) (string, bool) {
 	return "http://" + endpoint, false
 }
 
-func NewClient(opts config.S3Options, secretAccessKey string) (*minio.Client, error) {
-	endpoint, secure := endpointFor(opts)
+func NewClient(opts config.S3Options, secretAccessKey string) (*s3.Client, error) {
+	endpoint, _ := endpointFor(opts)
 	region := opts.Region
 	if region == "" {
 		region = "us-east-1"
 	}
-	lookup := minio.BucketLookupAuto
-	if opts.ForcePathStyle {
-		lookup = minio.BucketLookupPath
+	cfg := aws.Config{
+		Region:      region,
+		Credentials: credentials.NewStaticCredentialsProvider(opts.AccessKey, secretAccessKey, ""),
 	}
-	return minio.New(endpoint, &minio.Options{
-		Creds:        credentials.NewStaticV4(opts.AccessKey, secretAccessKey, ""),
-		Secure:       secure,
-		Region:       region,
-		BucketLookup: lookup,
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+		o.UsePathStyle = opts.ForcePathStyle
 	})
+	return client, nil
 }
 
 func ObjectKey(dumpsRoot, filePath string) (string, error) {
@@ -110,25 +111,38 @@ func ListObjects(ctx context.Context, opts config.S3Options, secretAccessKey str
 	if err != nil {
 		return nil, err
 	}
-	ch := client.ListObjects(ctx, opts.BucketName, minio.ListObjectsOptions{Recursive: true})
+	paginator := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(opts.BucketName),
+	})
 	var objects []Object
-	for item := range ch {
-		if item.Err != nil {
-			return nil, item.Err
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, err
 		}
-		if !strings.HasSuffix(item.Key, ".dump") && !strings.HasSuffix(item.Key, ".dump.enc") {
-			continue
+		for _, item := range page.Contents {
+			if item.Key == nil {
+				continue
+			}
+			key := *item.Key
+			if !strings.HasSuffix(key, ".dump") && !strings.HasSuffix(key, ".dump.enc") {
+				continue
+			}
+			var lm *time.Time
+			if item.LastModified != nil {
+				t := *item.LastModified
+				lm = &t
+			}
+			size := int64(0)
+			if item.Size != nil {
+				size = *item.Size
+			}
+			objects = append(objects, Object{
+				Key:          key,
+				Size:         size,
+				LastModified: lm,
+			})
 		}
-		var lm *time.Time
-		if !item.LastModified.IsZero() {
-			t := item.LastModified
-			lm = &t
-		}
-		objects = append(objects, Object{
-			Key:          item.Key,
-			Size:         item.Size,
-			LastModified: lm,
-		})
 	}
 	sort.Slice(objects, func(i, j int) bool {
 		return objects[i].Key > objects[j].Key
@@ -145,19 +159,28 @@ func VerifyBucket(ctx context.Context, opts config.S3Options, secretAccessKey st
 	return err
 }
 
-func Upload(ctx context.Context, client *minio.Client, bucket, dumpsRoot, filePath string) (string, error) {
+func Upload(ctx context.Context, client *s3.Client, bucket, dumpsRoot, filePath string) (string, error) {
 	key, err := ObjectKey(dumpsRoot, filePath)
 	if err != nil {
 		return "", err
 	}
-	_, err = client.FPutObject(ctx, bucket, key, filePath, minio.PutObjectOptions{})
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Body:   f,
+	})
 	if err != nil {
 		return "", err
 	}
 	return key, nil
 }
 
-func Download(ctx context.Context, client *minio.Client, bucket, dumpsRoot, key string) (string, error) {
+func Download(ctx context.Context, client *s3.Client, bucket, dumpsRoot, key string) (string, error) {
 	safe, err := safeObjectKey(key)
 	if err != nil {
 		return "", err
@@ -169,7 +192,20 @@ func Download(ctx context.Context, client *minio.Client, bucket, dumpsRoot, key 
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		return "", err
 	}
-	if err := client.FGetObject(ctx, bucket, safe, localPath, minio.GetObjectOptions{}); err != nil {
+	out, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(safe),
+	})
+	if err != nil {
+		return "", err
+	}
+	defer out.Body.Close()
+	f, err := os.Create(localPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := io.Copy(f, out.Body); err != nil {
 		return "", err
 	}
 	return localPath, nil
