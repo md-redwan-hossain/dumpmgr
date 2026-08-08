@@ -1,8 +1,10 @@
 import { chmod, writeFile } from "node:fs/promises";
+import { platform } from "node:os";
 import { describe, expect, test } from "bun:test";
 import {
   databaseExists,
   dockerHost,
+  dockerRunHostArgs,
   restoreJobs,
   setDockerDebug,
   verifyConnection,
@@ -16,6 +18,18 @@ describe("docker helpers", () => {
     expect(dockerHost("::1")).toBe("host.docker.internal");
     expect(dockerHost("postgres.internal")).toBe("postgres.internal");
     expect(restoreJobs()).toBeGreaterThanOrEqual(1);
+  });
+
+  test("adds host-gateway mapping on Linux for loopback hosts", () => {
+    if (platform() === "linux") {
+      expect(dockerRunHostArgs("localhost")).toEqual([
+        "--add-host",
+        "host.docker.internal:host-gateway",
+      ]);
+      expect(dockerRunHostArgs("postgres.internal")).toEqual([]);
+    } else {
+      expect(dockerRunHostArgs("localhost")).toEqual([]);
+    }
   });
 
   test("runs connection checks without exposing passwords in debug logs", async () => {

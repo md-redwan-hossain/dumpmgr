@@ -6,6 +6,8 @@ import {
   encryptSecret,
 } from "../src/crypto.ts";
 import {
+  changeMasterPassword,
+  createMetadataWithMaster,
   deleteDbPassword,
   emptyMetadata,
   getDbPassword,
@@ -13,6 +15,7 @@ import {
   loadMetadata,
   setDbPassword,
   setS3SecretKey,
+  unlockSession,
   type Session,
   writeMetadata,
 } from "../src/metadata.ts";
@@ -72,6 +75,25 @@ describe("metadata", () => {
       expect(await deleteDbPassword(reloaded, "postgres:prod")).toBe(true);
       expect(await deleteDbPassword(reloaded, "postgres:missing")).toBe(false);
       expect(await getDbPassword(reloaded, "postgres:prod")).toBeNull();
+    });
+  });
+
+  test("changeMasterPassword re-encrypts DB and S3 secrets", async () => {
+    await withTempDir(async (directory) => {
+      const path = `${directory}/metadata`;
+      const master = "old-master";
+      await createMetadataWithMaster(path, master);
+      const session = await unlockSession(path, master);
+      await setDbPassword(session, "postgres:prod", "db-secret");
+      await setS3SecretKey(session, "s3-secret");
+      const oldS3Cipher = session.metadata.s3SecretKey;
+
+      await changeMasterPassword(session, "new-master");
+      const reloaded = await unlockSession(path, "new-master");
+
+      expect(await getDbPassword(reloaded, "postgres:prod")).toBe("db-secret");
+      expect(await getS3SecretKey(reloaded)).toBe("s3-secret");
+      expect(reloaded.metadata.s3SecretKey).not.toBe(oldS3Cipher);
     });
   });
 

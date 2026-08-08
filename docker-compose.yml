@@ -1,0 +1,27 @@
+# Autonomous dumpmgr: scheduled Postgres backups via Docker + optional S3 upload.
+#
+# Prerequisites:
+#   - config.jsonc with autonomous.schedules and database items
+#   - metadata with master password and saved DB passwords (run interactive dumpmgr once)
+#   - DUMPMGR_MASTER_PASSWORD in .env (or environment)
+#
+# Usage:
+#   docker compose up -d
+#   docker compose logs -f dumpmgr
+
+services:
+  dumpmgr:
+    build: .
+    container_name: dumpmgr
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config.jsonc:/data/config.jsonc:ro
+      - ./metadata:/data/metadata
+      - ./dumps:/data/dumps
+    environment:
+      DUMPMGR_MASTER_PASSWORD: ${DUMPMGR_MASTER_PASSWORD:?set DUMPMGR_MASTER_PASSWORD in .env}
+      DUMPMGR_S3_SECRET_KEY: ${DUMPMGR_S3_SECRET_KEY:-}
+      # Reach Postgres on the Docker host (Linux): attach pg_dump containers to host network.
+      DUMPMGR_DOCKER_NETWORK: ${DUMPMGR_DOCKER_NETWORK:-host}
+    working_dir: /data
