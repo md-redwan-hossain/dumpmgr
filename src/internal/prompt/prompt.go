@@ -1,13 +1,12 @@
 package prompt
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/charmbracelet/huh"
+	clack "github.com/orochaa/go-clack/prompts"
 	"github.com/md-redwan-hossain/dumpmgr/src/internal/config"
 	"github.com/md-redwan-hossain/dumpmgr/src/internal/dumps"
 	"github.com/md-redwan-hossain/dumpmgr/src/internal/metadata"
@@ -44,50 +43,52 @@ const (
 )
 
 func OnCancel() {
-	fmt.Println("Aborted.")
+	clack.Cancel("Aborted.")
 	os.Exit(0)
 }
 
-// runForm runs a huh form. User abort exits like clack cancel; other errors return.
-func runForm(form *huh.Form) error {
-	if err := form.Run(); err != nil {
-		if errors.Is(err, huh.ErrUserAborted) {
-			OnCancel()
-		}
-		return err
+func exitOnCancel[T any](v T, err error) T {
+	if err != nil {
+		OnCancel()
 	}
-	return nil
+	return v
+}
+
+func runSelect[T comparable](message string, options []*clack.SelectOption[T]) T {
+	return exitOnCancel(clack.Select(clack.SelectParams[T]{
+		Message: message,
+		Options: options,
+	}))
+}
+
+func runConfirm(message string, initial bool) bool {
+	return exitOnCancel(clack.Confirm(clack.ConfirmParams{
+		Message:      message,
+		InitialValue: initial,
+	}))
 }
 
 func SelectMode(cfg *config.Config) (Mode, error) {
-	options := []huh.Option[Mode]{
-		huh.NewOption("Take dump", ModeDump),
-		huh.NewOption("Restore from dump", ModeRestore),
-		huh.NewOption("Take dump and restore", ModeDumpRestore),
+	options := []*clack.SelectOption[Mode]{
+		{Label: "Take dump", Value: ModeDump, Hint: "Write dump file only"},
+		{Label: "Restore from dump", Value: ModeRestore, Hint: "Pick a dump file → destination"},
+		{Label: "Take dump and restore", Value: ModeDumpRestore, Hint: "Copy source → destination"},
 	}
 	if config.NeedsMaster(cfg) {
-		options = append(options, huh.NewOption("Change master password", ModeChangeMaster))
+		options = append(options, &clack.SelectOption[Mode]{
+			Label: "Change master password",
+			Value: ModeChangeMaster,
+			Hint:  "Rotate master + re-encrypt secrets",
+		})
 	}
 	if cfg.S3Options != nil {
 		options = append(options,
-			huh.NewOption("Upload dump to S3", ModeS3Upload),
-			huh.NewOption("Download dump from S3", ModeS3Download),
+			&clack.SelectOption[Mode]{Label: "Upload dump to S3", Value: ModeS3Upload, Hint: "Copy a local dump to the configured bucket"},
+			&clack.SelectOption[Mode]{Label: "Download dump from S3", Value: ModeS3Download, Hint: "Browse objects and download one locally"},
 		)
 	}
-	options = append(options, huh.NewOption("Exit", ModeExit))
-
-	var choice Mode
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewSelect[Mode]().
-			Title("What do you want to do?").
-			Description("Dump / restore Postgres via Docker").
-			Options(options...).
-			Value(&choice),
-	))
-	if err := runForm(form); err != nil {
-		return "", err
-	}
-	return choice, nil
+	options = append(options, &clack.SelectOption[Mode]{Label: "Exit", Value: ModeExit})
+	return runSelect("What do you want to do?", options), nil
 }
 
 func RequireItems(cfg *config.Config, minItems int) error {
@@ -111,20 +112,17 @@ func SelectDatabaseItem(items []config.DatabaseItem, message string, exclude str
 	if len(list) == 0 {
 		return config.DatabaseItem{}, fmt.Errorf("no databases available to select")
 	}
-	options := make([]huh.Option[string], len(list))
+	options := make([]*clack.SelectOption[string], len(list))
 	lookup := make(map[string]config.DatabaseItem)
 	for i, db := range list {
-		options[i] = huh.NewOption(fmt.Sprintf("%s (%s)", db.Key, itemHint(db)), db.Key)
+		options[i] = &clack.SelectOption[string]{
+			Label: fmt.Sprintf("%s — %s", db.Key, itemHint(db)),
+			Value: db.Key,
+		}
 		lookup[db.Key] = db
 	}
-	var choice string
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewSelect[string]().Title(message).Options(options...).Value(&choice),
-	))
-	if err := runForm(form); err != nil {
-		return config.DatabaseItem{}, err
-	}
-	return lookup[choice], nil
+	key := runSelect(message, options)
+	return lookup[key], nil
 }
 
 func SelectDatabaseTree(cfg *config.Config, message, exclude string) (config.DatabaseItem, error) {
@@ -139,7 +137,7 @@ func SelectDatabaseTree(cfg *config.Config, message, exclude string) (config.Dat
 	if len(filtered) == 0 {
 		return config.DatabaseItem{}, fmt.Errorf("no databases available to select")
 	}
-	options := make([]huh.Option[string], 0, len(filtered))
+	options := make([]*clack.SelectOption[string], 0, len(filtered))
 	lookup := make(map[string]config.TreeDatabaseOption)
 	for _, db := range filtered {
 		leaf := db.Key
@@ -147,20 +145,16 @@ func SelectDatabaseTree(cfg *config.Config, message, exclude string) (config.Dat
 			parts := strings.Split(db.Key, ":")
 			leaf = "  └ " + parts[len(parts)-1]
 		}
-		options = append(options, huh.NewOption(fmt.Sprintf("%s (%s)", leaf, itemHint(db.DatabaseItem)), db.Key))
+		options = append(options, &clack.SelectOption[string]{
+			Label: fmt.Sprintf("%s — %s", leaf, itemHint(db.DatabaseItem)),
+			Value: db.Key,
+		})
 		lookup[db.Key] = db
 	}
-	var choice string
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewSelect[string]().Title(message).Options(options...).Value(&choice),
-	))
-	if err := runForm(form); err != nil {
-		return config.DatabaseItem{}, err
-	}
-	return lookup[choice].DatabaseItem, nil
+	key := runSelect(message, options)
+	return lookup[key].DatabaseItem, nil
 }
 
-// ResolveDatabaseItem returns the item for key when set, otherwise prompts interactively.
 func ResolveDatabaseItem(items []config.DatabaseItem, key, message, exclude string) (config.DatabaseItem, error) {
 	if key != "" {
 		if key == exclude {
@@ -176,7 +170,6 @@ func ResolveDatabaseItem(items []config.DatabaseItem, key, message, exclude stri
 	return SelectDatabaseItem(items, message, exclude)
 }
 
-// ResolveDatabaseTree returns the restore-tree item for key when set, otherwise prompts interactively.
 func ResolveDatabaseTree(cfg *config.Config, key, message, exclude string) (config.DatabaseItem, error) {
 	if key != "" {
 		if key == exclude {
@@ -201,20 +194,10 @@ func Password(message string) (string, error) {
 	if !strings.HasPrefix(message, "Enter ") {
 		labeled = "Enter " + message
 	}
-	var pw string
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewInput().
-			Title(labeled).
-			EchoMode(huh.EchoModePassword).
-			Value(&pw),
-	))
-	if err := runForm(form); err != nil {
-		return "", err
-	}
-	if pw == "" {
-		fmt.Println("Password is required.")
-		os.Exit(1)
-	}
+	pw := exitOnCancel(clack.Password(clack.PasswordParams{
+		Message:  labeled,
+		Required: true,
+	}))
 	return pw, nil
 }
 
@@ -222,79 +205,57 @@ func ConfirmOrYes(message string, yes bool, initialValue bool) (bool, error) {
 	if yes {
 		return true, nil
 	}
-	var result bool
-	if initialValue {
-		result = true
-	}
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewConfirm().Title(message).Value(&result).Affirmative("Yes").Negative("No"),
-	))
-	if err := runForm(form); err != nil {
-		return false, err
-	}
-	return result, nil
+	return runConfirm(message, initialValue), nil
 }
 
 func SelectNestedRestoreAction(message string, childExists bool) (NestedRestoreAction, error) {
-	var choice NestedRestoreAction
-	var options []huh.Option[NestedRestoreAction]
+	var options []*clack.SelectOption[NestedRestoreAction]
 	if childExists {
-		options = []huh.Option[NestedRestoreAction]{
-			huh.NewOption("Yes — Restore into existing database", NestedYes),
-			huh.NewOption("Drop database and restore — DROP → CREATE → restore", NestedDrop),
-			huh.NewOption("No", NestedNo),
+		options = []*clack.SelectOption[NestedRestoreAction]{
+			{Label: "Yes — Restore into existing database", Value: NestedYes},
+			{Label: "Drop database and restore — DROP → CREATE → restore", Value: NestedDrop},
+			{Label: "No", Value: NestedNo},
 		}
 	} else {
-		options = []huh.Option[NestedRestoreAction]{
-			huh.NewOption("Create database and restore — CREATE → restore", NestedCreate),
-			huh.NewOption("No", NestedNo),
+		options = []*clack.SelectOption[NestedRestoreAction]{
+			{Label: "Create database and restore — CREATE → restore", Value: NestedCreate},
+			{Label: "No", Value: NestedNo},
 		}
 	}
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewSelect[NestedRestoreAction]().Title(message).Options(options...).Value(&choice),
-	))
-	if err := runForm(form); err != nil {
-		return "", err
-	}
-	return choice, nil
+	return runSelect(message, options), nil
 }
 
 func SelectReplaceExistingObjects(yes bool) (bool, error) {
 	if yes {
 		return true, nil
 	}
-	var choice bool
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewSelect[bool]().
-			Title("Existing objects in destination?").
-			Options(
-				huh.NewOption("Replace existing objects — pg_restore --clean --if-exists", true),
-				huh.NewOption("Keep existing objects — May fail on name collisions", false),
-			).
-			Value(&choice),
-	))
-	if err := runForm(form); err != nil {
-		return false, err
-	}
-	return choice, nil
+	type choice string
+	const (
+		replace choice = "replace"
+		keep    choice = "keep"
+	)
+	selected := runSelect("Existing objects in destination?", []*clack.SelectOption[choice]{
+		{Label: "Replace existing objects — pg_restore --clean --if-exists", Value: replace},
+		{Label: "Keep existing objects — May fail on name collisions", Value: keep},
+	})
+	return selected == replace, nil
 }
 
 func SelectNestedCreatePassword(hasSaved bool) (NestedCreatePasswordSource, error) {
-	var choice NestedCreatePasswordSource
-	options := []huh.Option[NestedCreatePasswordSource]{
-		huh.NewOption("Use password from parent — Restore with parent user credentials", PasswordParent),
+	options := []*clack.SelectOption[NestedCreatePasswordSource]{
+		{Label: "Use password from parent — Restore with parent user credentials", Value: PasswordParent},
 	}
 	if hasSaved {
-		options = append(options, huh.NewOption("Use saved password — Child user + password from vault", PasswordSaved))
+		options = append(options, &clack.SelectOption[NestedCreatePasswordSource]{
+			Label: "Use saved password — Child user + password from vault",
+			Value: PasswordSaved,
+		})
 	}
-	options = append(options, huh.NewOption("Create new password — Set password for child user, then restore", PasswordNew))
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewSelect[NestedCreatePasswordSource]().Title("Password for new database?").Options(options...).Value(&choice),
-	))
-	if err := runForm(form); err != nil {
-		return "", err
-	}
-	return choice, nil
+	options = append(options, &clack.SelectOption[NestedCreatePasswordSource]{
+		Label: "Create new password — Set password for child user, then restore",
+		Value: PasswordNew,
+	})
+	return runSelect("Password for new database?", options), nil
 }
 
 func ConfirmedPassword(label string) (string, error) {
@@ -343,27 +304,23 @@ func ConnectWithRetry(label string, getPassword func() (string, error), setPassw
 	for {
 		if err := connect(password); err == nil {
 			return password, nil
-		} else {
-			fmt.Printf("✗ %v\n", err)
 		}
-		var action string
-		form := huh.NewForm(huh.NewGroup(
-			huh.NewSelect[string]().
-				Title(fmt.Sprintf("Connection failed for %s. What next?", label)).
-				Options(
-					huh.NewOption("Retry", "retry"),
-					huh.NewOption("Change password and retry", "change"),
-					huh.NewOption("Abort", "abort"),
-				).
-				Value(&action),
-		))
-		if err := runForm(form); err != nil {
-			return "", err
-		}
-		if action == "abort" {
+		LogError(err.Error())
+		type action string
+		const (
+			retry  action = "retry"
+			change action = "change"
+			abort  action = "abort"
+		)
+		selected := runSelect(fmt.Sprintf("Connection failed for %s. What next?", label), []*clack.SelectOption[action]{
+			{Label: "Retry", Value: retry},
+			{Label: "Change password and retry", Value: change},
+			{Label: "Abort", Value: abort},
+		})
+		if selected == abort {
 			OnCancel()
 		}
-		if action == "change" {
+		if selected == change {
 			password, err = Password(fmt.Sprintf("new password for %s", label))
 			if err != nil {
 				return "", err
@@ -393,27 +350,21 @@ func BrowseDumpFile(rootDir string, encryptedOnly bool) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		var options []huh.Option[string]
+		var options []*clack.SelectOption[string]
 		if cwd != root {
-			options = append(options, huh.NewOption(".. — Parent folder", ".."))
+			options = append(options, &clack.SelectOption[string]{Label: ".. — Parent folder", Value: ".."})
 		}
 		for _, e := range entries {
 			if e.Kind == dumps.EntryDir {
-				options = append(options, huh.NewOption(e.Name+"/ — Folder", "dir:"+e.Name))
+				options = append(options, &clack.SelectOption[string]{Label: e.Name + "/ — Folder", Value: "dir:" + e.Name})
 			} else {
-				options = append(options, huh.NewOption(e.Name, "file:"+e.Name))
+				options = append(options, &clack.SelectOption[string]{Label: e.Name, Value: "file:" + e.Name})
 			}
 		}
 		if len(options) == 0 {
 			return "", fmt.Errorf("no dump files or folders under %s", root)
 		}
-		var choice string
-		form := huh.NewForm(huh.NewGroup(
-			huh.NewSelect[string]().Title(fmt.Sprintf("Browse dumps (%s)", rel)).Options(options...).Value(&choice),
-		))
-		if err := runForm(form); err != nil {
-			return "", err
-		}
+		choice := runSelect(fmt.Sprintf("Browse dumps (%s)", rel), options)
 		if choice == ".." {
 			cwd = filepath.Dir(cwd)
 			if !strings.HasPrefix(cwd, root) {
@@ -435,123 +386,54 @@ func SelectS3Object(objects []s3.Object) (string, error) {
 	if len(objects) == 0 {
 		return "", fmt.Errorf("no dump objects found in the S3 bucket")
 	}
-	options := make([]huh.Option[string], len(objects))
+	options := make([]*clack.SelectOption[string], len(objects))
 	for i, obj := range objects {
-		options[i] = huh.NewOption(fmt.Sprintf("%s (%s)", obj.Key, s3.FormatObject(obj)), obj.Key)
+		options[i] = &clack.SelectOption[string]{
+			Label: fmt.Sprintf("%s — %s", obj.Key, s3.FormatObject(obj)),
+			Value: obj.Key,
+		}
 	}
-	var choice string
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewSelect[string]().Title("Select an S3 dump object").Options(options...).Value(&choice),
-	))
-	if err := runForm(form); err != nil {
-		return "", err
-	}
-	return choice, nil
+	return runSelect("Select an S3 dump object", options), nil
 }
 
 func SelectInitChoice() (string, error) {
-	var choice string
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewSelect[string]().
-			Title("Run config init to create config?").
-			Options(
-				huh.NewOption("Init with fake data", "fake"),
-				huh.NewOption("Init with empty items", "empty"),
-				huh.NewOption("Abort", "abort"),
-			).
-			Value(&choice),
-	))
-	if err := runForm(form); err != nil {
-		return "", err
-	}
-	return choice, nil
+	return runSelect("Run config init to create config?", []*clack.SelectOption[string]{
+		{Label: "Init with fake data", Value: "fake"},
+		{Label: "Init with empty items", Value: "empty"},
+		{Label: "Abort", Value: "abort"},
+	}), nil
 }
 
 func SelectMasterAction() (string, error) {
-	var action string
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewSelect[string]().
-			Title("Existing master password found in vault").
-			Options(
-				huh.NewOption("Change master password", "change"),
-				huh.NewOption("Continue with existing master password", "continue"),
-			).
-			Value(&action),
-	))
-	if err := runForm(form); err != nil {
-		return "", err
-	}
-	return action, nil
+	return runSelect("Existing master password found in vault", []*clack.SelectOption[string]{
+		{Label: "Change master password", Value: "change"},
+		{Label: "Continue with existing master password", Value: "continue"},
+	}), nil
 }
 
 func SelectEncryptedDumpAction() (string, error) {
-	var action string
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewSelect[string]().
-			Title("What should happen to existing dumps?").
-			Options(
-				huh.NewOption("Re-encrypt dumps", "reencrypt"),
-				huh.NewOption("Delete matching encrypted dumps", "delete"),
-			).
-			Value(&action),
-	))
-	if err := runForm(form); err != nil {
-		return "", err
-	}
-	return action, nil
+	return runSelect("What should happen to existing dumps?", []*clack.SelectOption[string]{
+		{Label: "Re-encrypt dumps", Value: "reencrypt"},
+		{Label: "Delete matching encrypted dumps", Value: "delete"},
+	}), nil
 }
 
 func ConfirmOverwrite(path string) (bool, error) {
-	var ok bool
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewConfirm().Title(fmt.Sprintf("%s already exists. Overwrite?", path)).Value(&ok).Affirmative("Yes").Negative("No"),
-	))
-	if err := runForm(form); err != nil {
-		return false, err
-	}
-	return ok, nil
+	return runConfirm(fmt.Sprintf("%s already exists. Overwrite?", path), false), nil
 }
 
 func ConfirmWipeSecret(key string) (bool, error) {
-	var ok bool
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewConfirm().Title(fmt.Sprintf(`Remove saved password for "%s"?`, key)).Value(&ok).Affirmative("Yes").Negative("No"),
-	))
-	if err := runForm(form); err != nil {
-		return false, err
-	}
-	return ok, nil
+	return runConfirm(fmt.Sprintf(`Remove saved password for "%s"?`, key), false), nil
 }
 
 func ConfirmInitOverwrite(path string) (bool, error) {
-	var ok bool
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewConfirm().Title(fmt.Sprintf("%s already exists. Overwrite?", path)).Value(&ok).Affirmative("Yes").Negative("No"),
-	))
-	if err := runForm(form); err != nil {
-		return false, err
-	}
-	return ok, nil
+	return runConfirm(fmt.Sprintf("%s already exists. Overwrite?", path), false), nil
 }
 
 func ConfirmFakeData() (bool, error) {
-	var ok bool
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewConfirm().Title("Populate with dummy data?").Value(&ok).Affirmative("Yes").Negative("No"),
-	))
-	if err := runForm(form); err != nil {
-		return false, err
-	}
-	return ok, nil
+	return runConfirm("Populate with dummy data?", false), nil
 }
 
 func TryAgain() (bool, error) {
-	ok := true
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewConfirm().Title("Try again?").Value(&ok).Affirmative("Yes").Negative("No"),
-	))
-	if err := runForm(form); err != nil {
-		return false, err
-	}
-	return ok, nil
+	return runConfirm("Try again?", true), nil
 }

@@ -42,12 +42,12 @@ func PrepareRestoreDestination(opts PrepareRestoreDestinationOpts) (PrepareResto
 			)
 		}
 
-		fmt.Printf("→ Verifying parent %q…\n", parentItem.Key)
+		prompt.LogStep(fmt.Sprintf("Verifying parent %q…", parentItem.Key))
 		parentDB, err := resolveConnectedDB(cfg, session, *parentItem, "destination", false)
 		if err != nil {
 			return PrepareRestoreDestinationResult{}, err
 		}
-		fmt.Printf("✓ Parent %q OK\n", parentItem.Key)
+		prompt.LogSuccess(fmt.Sprintf("Parent %q OK", parentItem.Key))
 
 		parentLogin := parentDB.Database
 		childTarget := docker.ResolvedDB{
@@ -71,21 +71,21 @@ func PrepareRestoreDestination(opts PrepareRestoreDestinationOpts) (PrepareResto
 		}
 
 		if action == prompt.NestedDrop {
-			fmt.Printf("→ Dropping database %q…\n", destItem.Database)
+			prompt.LogStep(fmt.Sprintf("Dropping database %q…", destItem.Database))
 			if err := docker.DropDatabase(image, childTarget, parentLogin); err != nil {
 				return PrepareRestoreDestinationResult{}, err
 			}
-			fmt.Printf("→ Creating database %q…\n", destItem.Database)
+			prompt.LogStep(fmt.Sprintf("Creating database %q…", destItem.Database))
 			if err := docker.CreateDatabase(image, childTarget, parentLogin); err != nil {
 				return PrepareRestoreDestinationResult{}, err
 			}
-			fmt.Printf("✓ Recreated %q\n", destItem.Database)
+			prompt.LogSuccess(fmt.Sprintf("Recreated %q", destItem.Database))
 		} else if action == prompt.NestedCreate {
-			fmt.Printf("→ Creating database %q…\n", destItem.Database)
+			prompt.LogStep(fmt.Sprintf("Creating database %q…", destItem.Database))
 			if err := docker.CreateDatabase(image, childTarget, parentLogin); err != nil {
 				return PrepareRestoreDestinationResult{}, err
 			}
-			fmt.Printf("✓ Created %q\n", destItem.Database)
+			prompt.LogSuccess(fmt.Sprintf("Created %q", destItem.Database))
 		}
 
 		if action == prompt.NestedCreate || action == prompt.NestedDrop {
@@ -134,7 +134,7 @@ func PrepareRestoreDestination(opts PrepareRestoreDestinationOpts) (PrepareResto
 				if err != nil {
 					return PrepareRestoreDestinationResult{}, err
 				}
-				fmt.Printf("→ Ensuring login %q…\n", destItem.User)
+				prompt.LogStep(fmt.Sprintf("Ensuring login %q…", destItem.User))
 				if err := docker.EnsureDatabaseLogin(image, parentDB, docker.EnsureLoginOpts{
 					User: destItem.User, Password: password, Database: destItem.Database, ConnectDatabase: parentLogin,
 				}); err != nil {
@@ -145,7 +145,7 @@ func PrepareRestoreDestination(opts PrepareRestoreDestinationOpts) (PrepareResto
 						return PrepareRestoreDestinationResult{}, err
 					}
 				}
-				fmt.Printf("✓ Login %q ready\n", destItem.User)
+				prompt.LogSuccess(fmt.Sprintf("Login %q ready", destItem.User))
 				return PrepareRestoreDestinationResult{
 					DestDB:       docker.ResolvedDB{DatabaseItem: destItem, Password: password},
 					IntoExisting: false,

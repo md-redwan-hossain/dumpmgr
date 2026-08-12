@@ -11,6 +11,7 @@ import (
 	"github.com/md-redwan-hossain/dumpmgr/src/internal/config"
 	"github.com/md-redwan-hossain/dumpmgr/src/internal/dumps"
 	"github.com/md-redwan-hossain/dumpmgr/src/internal/metadata"
+	"github.com/md-redwan-hossain/dumpmgr/src/internal/prompt"
 	"github.com/md-redwan-hossain/dumpmgr/src/internal/vault"
 	"github.com/spf13/cobra"
 )
@@ -32,7 +33,7 @@ func addVaultCommands(root *cobra.Command, configPath *string) {
 		Short: "Show vault summary (counts, encId, path)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := config.ResolvePath(*configPath)
-			fmt.Println("dumpmgr vault status")
+			prompt.Intro("dumpmgr vault status")
 			store, err := vault.Open(path)
 			if err != nil {
 				return err
@@ -42,14 +43,14 @@ func addVaultCommands(root *cobra.Command, configPath *string) {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("path:          %s\n", st.DBPath)
-			fmt.Printf("schema:        v%d\n", st.SchemaVersion)
-			fmt.Printf("master:        %v\n", st.HasMaster)
-			fmt.Printf("encId:         %s\n", st.EncID)
-			fmt.Printf("secrets:       %d\n", st.SecretCount)
-			fmt.Printf("dumps indexed: %d\n", st.DumpCount)
-			fmt.Printf("audit entries: %d\n", st.AuditCount)
-			fmt.Printf("restores:      %d\n", st.RestoreCount)
+			prompt.LogInfo(fmt.Sprintf("path:          %s", st.DBPath))
+			prompt.LogInfo(fmt.Sprintf("schema:        v%d", st.SchemaVersion))
+			prompt.LogInfo(fmt.Sprintf("master:        %v", st.HasMaster))
+			prompt.LogInfo(fmt.Sprintf("encId:         %s", st.EncID))
+			prompt.LogInfo(fmt.Sprintf("secrets:       %d", st.SecretCount))
+			prompt.LogInfo(fmt.Sprintf("dumps indexed: %d", st.DumpCount))
+			prompt.LogInfo(fmt.Sprintf("audit entries: %d", st.AuditCount))
+			prompt.LogInfo(fmt.Sprintf("restores:      %d", st.RestoreCount))
 			return nil
 		},
 	}
@@ -67,7 +68,7 @@ func addAuditCommands(root *cobra.Command, configPath *string) {
 		Short: "List recent audit log entries",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := config.ResolvePath(*configPath)
-			fmt.Println("dumpmgr audit list")
+			prompt.Intro("dumpmgr audit list")
 			store, err := vault.Open(path)
 			if err != nil {
 				return err
@@ -78,7 +79,7 @@ func addAuditCommands(root *cobra.Command, configPath *string) {
 				return err
 			}
 			if len(entries) == 0 {
-				fmt.Println("No audit entries.")
+				prompt.LogInfo("No audit entries.")
 				return nil
 			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -117,7 +118,7 @@ func addDumpRegistryCommands(root *cobra.Command, configPath *string) {
 				return err
 			}
 			if len(records) == 0 {
-				fmt.Println("No indexed dumps. Run `dumpmgr dump-registry scan` to index existing files.")
+				prompt.LogInfo("No indexed dumps. Run `dumpmgr dump-registry scan` to index existing files.")
 				return nil
 			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -149,16 +150,16 @@ func addDumpRegistryCommands(root *cobra.Command, configPath *string) {
 				return err
 			}
 			if rec == nil {
-				fmt.Printf("Dump not indexed: %s\n", args[0])
+				prompt.LogWarn(fmt.Sprintf("Dump not indexed: %s", args[0]))
 				return nil
 			}
-			fmt.Printf("path:      %s\n", rec.RelativePath)
-			fmt.Printf("item:      %s\n", rec.ItemKey)
-			fmt.Printf("sha256:    %s\n", rec.SHA256)
-			fmt.Printf("size:      %d bytes\n", rec.SizeBytes)
-			fmt.Printf("encrypted: %v\n", rec.Encrypted)
-			fmt.Printf("encId:     %s\n", rec.EncID)
-			fmt.Printf("created:   %s\n", rec.CreatedAt.UTC().Format(time.RFC3339))
+			prompt.LogInfo(fmt.Sprintf("path:      %s", rec.RelativePath))
+			prompt.LogInfo(fmt.Sprintf("item:      %s", rec.ItemKey))
+			prompt.LogInfo(fmt.Sprintf("sha256:    %s", rec.SHA256))
+			prompt.LogInfo(fmt.Sprintf("size:      %d bytes", rec.SizeBytes))
+			prompt.LogInfo(fmt.Sprintf("encrypted: %v", rec.Encrypted))
+			prompt.LogInfo(fmt.Sprintf("encId:     %s", rec.EncID))
+			prompt.LogInfo(fmt.Sprintf("created:   %s", rec.CreatedAt.UTC().Format(time.RFC3339)))
 			return nil
 		},
 	}
@@ -196,7 +197,7 @@ func addDumpRegistryCommands(root *cobra.Command, configPath *string) {
 				return fmt.Errorf("checksum mismatch for %s", args[0])
 			}
 			_ = store.RecordAudit(vault.ActionDumpVerify, vault.StatusSuccess, args[0], "", "checksum ok", "")
-			fmt.Printf("✓ %s checksum OK (%s)\n", args[0], hash)
+			prompt.LogSuccess(fmt.Sprintf("%s checksum OK (%s)", args[0], hash))
 			return nil
 		},
 	}
@@ -221,7 +222,7 @@ func addDumpRegistryCommands(root *cobra.Command, configPath *string) {
 				return err
 			}
 			_ = store.RecordAudit(vault.ActionDumpScan, vault.StatusSuccess, root, "", fmt.Sprintf("indexed=%d", n), "")
-			fmt.Printf("✓ Indexed %d dump file(s)\n", n)
+			prompt.LogSuccess(fmt.Sprintf("Indexed %d dump file(s)", n))
 			return nil
 		},
 	}
@@ -249,7 +250,7 @@ func addRestoreHistoryCommands(root *cobra.Command, configPath *string) {
 				return err
 			}
 			if len(rows) == 0 {
-				fmt.Println("No restore history.")
+				prompt.LogInfo("No restore history.")
 				return nil
 			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -274,11 +275,11 @@ func printSecretHistory(session *metadata.Session, key string, limit int) error 
 		return err
 	}
 	if len(rows) == 0 {
-		fmt.Printf("No rotation history for %q.\n", key)
+		prompt.LogInfo(fmt.Sprintf("No rotation history for %q.", key))
 		return nil
 	}
 	for _, r := range rows {
-		fmt.Printf("%s  %s  %s\n", r.RotatedAt.UTC().Format(time.RFC3339), r.Action, r.SecretKey)
+		prompt.LogInfo(fmt.Sprintf("%s  %s  %s", r.RotatedAt.UTC().Format(time.RFC3339), r.Action, r.SecretKey))
 	}
 	return nil
 }
@@ -289,7 +290,7 @@ func printSecretList(session *metadata.Session) error {
 		return err
 	}
 	if len(infos) == 0 {
-		fmt.Println("No saved DB passwords.")
+		prompt.LogInfo("No saved DB passwords.")
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)

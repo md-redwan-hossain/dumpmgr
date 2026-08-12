@@ -44,7 +44,7 @@ const (
 )
 
 func Intro() {
-	fmt.Println("dumpmgr — Dump Manager, docker based db dump & restore tool")
+	prompt.Intro("dumpmgr — Dump Manager, docker based db dump & restore tool")
 }
 
 func UnlockOrNull(cfg *config.Config, configPath string) (*metadata.Session, error) {
@@ -61,7 +61,7 @@ func UnlockOrNull(cfg *config.Config, configPath string) (*metadata.Session, err
 		if err == nil {
 			return session, nil
 		}
-		fmt.Printf("✗ %v\n", err)
+		prompt.LogError(err.Error())
 		again, err := prompt.TryAgain()
 		if err != nil || !again {
 			prompt.OnCancel()
@@ -92,7 +92,7 @@ func requireS3Session(cfg *config.Config, configPath string) (*metadata.Session,
 		if err := metadata.SetS3SecretKey(session, secret); err != nil {
 			return nil, "", err
 		}
-		fmt.Println("✓ S3 secret access key encrypted in metadata")
+		prompt.LogSuccess("S3 secret access key encrypted in metadata")
 	}
 	return session, secret, nil
 }
@@ -127,7 +127,7 @@ func RunS3Action(action S3Action, cfg *config.Config, configPath string, yes boo
 		if err != nil {
 			return err
 		}
-		fmt.Printf("✓ Uploaded %s to %s\n", key, cfg.S3Options.BucketName)
+		prompt.LogSuccess(fmt.Sprintf("Uploaded %s to %s", key, cfg.S3Options.BucketName))
 		return nil
 	}
 
@@ -149,7 +149,7 @@ func RunS3Action(action S3Action, cfg *config.Config, configPath string, yes boo
 			return err
 		}
 		if !overwrite {
-			fmt.Println("⚠ Download cancelled")
+			prompt.LogWarn("Download cancelled")
 			return nil
 		}
 	}
@@ -157,7 +157,7 @@ func RunS3Action(action S3Action, cfg *config.Config, configPath string, yes boo
 	if err != nil {
 		return err
 	}
-	fmt.Printf("✓ Downloaded %s to %s\n", key, downloaded)
+	prompt.LogSuccess(fmt.Sprintf("Downloaded %s to %s", key, downloaded))
 	return nil
 }
 
@@ -251,7 +251,7 @@ func runRestoreWithSpinner(image string, db docker.ResolvedDB, workdir, dumpFile
 	s.FinalMSG = fmt.Sprintf("✓ Restore complete in %s", dumps.FormatDuration(elapsed))
 	s.Stop()
 	if result.Warnings != "" {
-		fmt.Printf("⚠ pg_restore reported ignored errors:\n%s\n", result.Warnings)
+		prompt.LogWarn(fmt.Sprintf("pg_restore reported ignored errors:\n%s", result.Warnings))
 	}
 	return elapsed, result.Warnings, nil
 }
@@ -275,11 +275,11 @@ func ensureDestDatabase(cfg *config.Config, dest docker.ResolvedDB, destName str
 	if !create {
 		return false, fmt.Errorf("destination database does not exist. Aborted")
 	}
-	fmt.Printf("→ Creating database %q…\n", dest.Database)
+	prompt.LogStep(fmt.Sprintf("Creating database %q…", dest.Database))
 	if err := docker.CreateDatabase(image, dest, ""); err != nil {
 		return false, err
 	}
-	fmt.Printf("✓ Created %q\n", dest.Database)
+	prompt.LogSuccess(fmt.Sprintf("Created %q", dest.Database))
 	return true, nil
 }
 
@@ -294,12 +294,12 @@ func handleChangeMaster(cfg *config.Config, session *metadata.Session) (*metadat
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("→ Re-encrypting saved database passwords…")
+	prompt.LogStep("Re-encrypting saved database passwords…")
 	updated, err := metadata.ChangeMasterPassword(session, next)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("✓ Database passwords re-encrypted")
+	prompt.LogSuccess("Database passwords re-encrypted")
 
 	dumpsRoot := dumps.ResolveRoot(cfg.DumpDirectory)
 	if encID != "" {
@@ -317,7 +317,7 @@ func handleChangeMaster(cfg *config.Config, session *metadata.Session) (*metadat
 				if err != nil {
 					return nil, err
 				}
-				fmt.Printf("✓ Deleted %d encrypted dump(s)\n", n)
+				prompt.LogSuccess(fmt.Sprintf("Deleted %d encrypted dump(s)", n))
 			} else {
 				if err := dumps.EnsureRootWritable(dumpsRoot); err != nil {
 					return nil, err
@@ -326,11 +326,11 @@ func handleChangeMaster(cfg *config.Config, session *metadata.Session) (*metadat
 				if err != nil {
 					return nil, err
 				}
-				fmt.Printf("✓ Re-encrypted %d dump file(s)\n", n)
+				prompt.LogSuccess(fmt.Sprintf("Re-encrypted %d dump file(s)", n))
 			}
 		}
 	}
-	fmt.Println("✓ Master password changed")
+	prompt.LogSuccess("Master password changed")
 	return updated, nil
 }
 
@@ -388,15 +388,15 @@ func runDump(opts Options, cfg *config.Config, session *metadata.Session, items 
 		if err != nil || encID == "" {
 			return fmt.Errorf("encId missing from vault")
 		}
-		fmt.Println("→ Encrypting dump…")
+		prompt.LogStep("Encrypting dump…")
 		finalPath, err = dumps.EncryptDumpFile(dumpPath, session.AESKey, encID)
 		if err != nil {
 			return err
 		}
 		size, _ := dumps.FileSize(finalPath)
-		fmt.Printf("✓ Encrypted (%s)\n", dumps.FormatBytes(size))
+		prompt.LogSuccess(fmt.Sprintf("Encrypted (%s)", dumps.FormatBytes(size)))
 	}
-	fmt.Printf("✓ Dump saved at %s\n", finalPath)
+	prompt.LogSuccess(fmt.Sprintf("Dump saved at %s", finalPath))
 	return recordDump(session, dumpsRoot, finalPath, sourceItem.Key)
 }
 
@@ -437,7 +437,7 @@ func runRestore(opts Options, cfg *config.Config, session *metadata.Session, ima
 		return err
 	}
 	if prepared.Cancelled {
-		fmt.Println("⚠ Restore cancelled")
+		prompt.LogWarn("Restore cancelled")
 		return nil
 	}
 	destDB := prepared.DestDB
@@ -456,7 +456,7 @@ func runRestore(opts Options, cfg *config.Config, session *metadata.Session, ima
 			return fmt.Errorf("AES key required to decrypt dump")
 		}
 		tempPlain = filepath.Join(dir, fmt.Sprintf(".dumpmgr-decrypt-%d_%s", time.Now().UnixMilli(), dumps.PlainTempNameFromEncrypted(fileName)))
-		fmt.Println("→ Decrypting dump…")
+		prompt.LogStep("Decrypting dump…")
 		if err := dumps.DecryptDumpToTemp(filepath.Join(dir, fileName), session.AESKey, tempPlain); err != nil {
 			return err
 		}
@@ -473,7 +473,7 @@ func runRestore(opts Options, cfg *config.Config, session *metadata.Session, ima
 		recordRestore(session, dumpsRoot, dumpPath, destItem.Key, int64(elapsed), clean, warnings, restoreErr)
 		return restoreErr
 	}
-	fmt.Printf("✓ Restored %s → %s\n", fileName, destItem.Key)
+	prompt.LogSuccess(fmt.Sprintf("Restored %s → %s", fileName, destItem.Key))
 	recordRestore(session, dumpsRoot, dumpPath, destItem.Key, int64(elapsed), clean, warnings, nil)
 	return nil
 }
@@ -504,19 +504,21 @@ func runDumpRestore(opts Options, cfg *config.Config, session *metadata.Session,
 		return err
 	}
 	if prepared.Cancelled {
-		fmt.Println("⚠ Sync cancelled")
+		prompt.LogWarn("Sync cancelled")
 		return nil
 	}
 	destDB := prepared.DestDB
 	destIntoExisting := prepared.IntoExisting
 
-	fmt.Println("Sync plan")
-	fmt.Printf("  Source:      %s → %s@%s:%d/%s\n", sourceItem.Key, sourceDB.User, sourceDB.Host, sourceDB.Port, sourceDB.Database)
-	fmt.Printf("  Destination: %s → %s@%s:%d/%s\n", destItem.Key, destDB.User, destDB.Host, destDB.Port, destDB.Database)
-	fmt.Printf("  Image:       %s\n", image)
-	fmt.Printf("  Compress:    %s\n", docker.DumpCompress)
-	fmt.Printf("  Dumps:       %s\n", dumpsRoot)
-	fmt.Printf("  Encrypted:   %v\n", cfg.EncryptedDump)
+	syncPlan := strings.Join([]string{
+		fmt.Sprintf("Source:      %s → %s@%s:%d/%s", sourceItem.Key, sourceDB.User, sourceDB.Host, sourceDB.Port, sourceDB.Database),
+		fmt.Sprintf("Destination: %s → %s@%s:%d/%s", destItem.Key, destDB.User, destDB.Host, destDB.Port, destDB.Database),
+		fmt.Sprintf("Image:       %s", image),
+		fmt.Sprintf("Compress:    %s", docker.DumpCompress),
+		fmt.Sprintf("Dumps:       %s", dumpsRoot),
+		fmt.Sprintf("Encrypted:   %v", cfg.EncryptedDump),
+	}, "\n")
+	prompt.LogNote("Sync plan", syncPlan)
 
 	confirmed, err := prompt.ConfirmOrYes(
 		fmt.Sprintf(`Overwrite destination %q with dump from %q?`, destItem.Key, sourceItem.Key),
@@ -526,7 +528,7 @@ func runDumpRestore(opts Options, cfg *config.Config, session *metadata.Session,
 		return err
 	}
 	if !confirmed {
-		fmt.Println("⚠ Sync cancelled")
+		prompt.LogWarn("Sync cancelled")
 		return nil
 	}
 
@@ -556,16 +558,16 @@ func runDumpRestore(opts Options, cfg *config.Config, session *metadata.Session,
 		if err != nil || encID == "" {
 			return fmt.Errorf("encId missing from vault")
 		}
-		fmt.Println("→ Encrypting dump…")
+		prompt.LogStep("Encrypting dump…")
 		finalPath, err = dumps.EncryptDumpFile(finalPath, session.AESKey, encID)
 		if err != nil {
 			return err
 		}
 		size, _ := dumps.FileSize(finalPath)
-		fmt.Printf("✓ Encrypted (%s)\n", dumps.FormatBytes(size))
+		prompt.LogSuccess(fmt.Sprintf("Encrypted (%s)", dumps.FormatBytes(size)))
 	}
-	fmt.Printf("ℹ Dump kept at %s\n", finalPath)
-	fmt.Printf("✓ Synced %s → %s\n", sourceItem.Key, destItem.Key)
+	prompt.LogInfo(fmt.Sprintf("Dump kept at %s", finalPath))
+	prompt.LogSuccess(fmt.Sprintf("Synced %s → %s", sourceItem.Key, destItem.Key))
 	if err := recordDump(session, dumpsRoot, finalPath, sourceItem.Key); err != nil {
 		return err
 	}
@@ -582,14 +584,14 @@ func resolveRestoreClean(intoExisting, yes bool) (bool, error) {
 
 func RunMain(opts Options) error {
 	if opts.Debug {
-		docker.SetDebug(true, func(msg string) { fmt.Println(msg) })
-		fmt.Println("Debug mode on")
+		docker.SetDebug(true, func(msg string) { prompt.LogInfo(msg) })
+		prompt.LogInfo("Debug mode on")
 	}
 	Intro()
 
 	configPath := config.ResolvePath(opts.ConfigPath)
 	if !config.Exists(configPath) {
-		fmt.Printf("✗ Config file not found: %s\n", configPath)
+		prompt.LogError(fmt.Sprintf("Config file not found: %s", configPath))
 		choice, err := prompt.SelectInitChoice()
 		if err != nil {
 			return err
@@ -626,7 +628,7 @@ func RunMain(opts Options) error {
 			return err
 		}
 		if mode == prompt.ModeExit {
-			fmt.Println("Bye")
+			prompt.Outro("Bye")
 			return nil
 		}
 		switch mode {
@@ -636,23 +638,23 @@ func RunMain(opts Options) error {
 			}
 			session, err = handleChangeMaster(cfg, session)
 			if err != nil {
-				fmt.Printf("✗ %v\n", err)
+				prompt.LogError(err.Error())
 			}
 		case prompt.ModeS3Upload:
 			if err := RunS3Action(S3Upload, cfg, configPath, opts.Yes); err != nil {
-				fmt.Printf("✗ %v\n", err)
+				prompt.LogError(err.Error())
 			}
 		case prompt.ModeS3Download:
 			if err := RunS3Action(S3Download, cfg, configPath, opts.Yes); err != nil {
-				fmt.Printf("✗ %v\n", err)
+				prompt.LogError(err.Error())
 			}
 		default:
 			if err := docker.AssertAvailable(); err != nil {
-				fmt.Printf("✗ %v\n", err)
+				prompt.LogError(err.Error())
 				continue
 			}
 			if err := RunMode(Mode(mode), opts, cfg, session); err != nil {
-				fmt.Printf("✗ %v\n", err)
+				prompt.LogError(err.Error())
 			}
 		}
 	}
@@ -660,7 +662,7 @@ func RunMain(opts Options) error {
 
 func UnlockForSecretOps(cfg *config.Config, configPath string) (*metadata.Session, error) {
 	if !config.NeedsMaster(cfg) {
-		fmt.Println(`⚠ metadata has no master password; nothing to list/wipe. Set "rememberPassword": true in config.jsonc.`)
+		prompt.LogWarn(`metadata has no master password; nothing to list/wipe. Set "rememberPassword": true in config.jsonc.`)
 		return nil, nil
 	}
 	return UnlockOrNull(cfg, configPath)
