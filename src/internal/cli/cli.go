@@ -112,7 +112,7 @@ func handleMain(configPath string, yes, debug bool, mode app.Mode, source, dest,
 		Dump:       dump,
 	}
 	if err := app.RunMain(opts); err != nil {
-		fmt.Printf("✗ %v\n", err)
+		prompt.LogError(err.Error())
 		return err
 	}
 	return nil
@@ -145,21 +145,21 @@ func addS3Commands(root *cobra.Command, configPath *string, yes *bool) {
 
 func handleS3(action app.S3Action, configPath string, yes bool) error {
 	path := config.ResolvePath(configPath)
-	fmt.Printf("dumpmgr s3 %s\n", action)
+	prompt.Intro(fmt.Sprintf("dumpmgr s3 %s", action))
 	if !config.Exists(path) {
-		fmt.Printf("✗ Config file not found: %s\n", path)
+		prompt.LogError(fmt.Sprintf("Config file not found: %s", path))
 		os.Exit(1)
 	}
 	cfg, err := config.Load(path)
 	if err != nil {
-		fmt.Printf("✗ %v\n", err)
+		prompt.LogError(err.Error())
 		os.Exit(1)
 	}
 	if err := app.RunS3Action(action, cfg, path, yes); err != nil {
-		fmt.Printf("✗ %v\n", err)
+		prompt.LogError(err.Error())
 		return err
 	}
-	fmt.Println("done")
+	prompt.Outro("done")
 	return nil
 }
 
@@ -169,34 +169,34 @@ func addDoctorCommand(root *cobra.Command, configPath *string) {
 		Short: "Check Docker daemon, dumps dir permissions, and metadata integrity",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := config.ResolvePath(*configPath)
-			fmt.Println("dumpmgr doctor")
+			prompt.Intro("dumpmgr doctor")
 			if !config.Exists(path) {
-				fmt.Printf("✗ Config file not found: %s\n", path)
-				fmt.Println("config missing")
+				prompt.LogError(fmt.Sprintf("Config file not found: %s", path))
+				prompt.LogError("config missing")
 				os.Exit(1)
 			}
 			cfg, err := config.Load(path)
 			if err != nil {
-				fmt.Printf("✗ %v\n", err)
-				fmt.Println("config invalid")
+				prompt.LogError(err.Error())
+				prompt.LogError("config invalid")
 				os.Exit(1)
 			}
 			report := doctor.Run(cfg, path)
 			for _, check := range report.Checks {
 				if check.OK {
-					fmt.Printf("✓ %s: %s\n", check.Name, check.Message)
+					prompt.LogSuccess(fmt.Sprintf("%s: %s", check.Name, check.Message))
 				} else {
-					fmt.Printf("✗ %s: %s\n", check.Name, check.Message)
+					prompt.LogError(fmt.Sprintf("%s: %s", check.Name, check.Message))
 					if check.Hint != "" {
-						fmt.Printf("  hint: %s\n", check.Hint)
+						prompt.LogInfo(fmt.Sprintf("hint: %s", check.Hint))
 					}
 				}
 			}
 			if report.OK {
-				fmt.Println("doctor ok")
+				prompt.Outro("doctor ok")
 				return nil
 			}
-			fmt.Println("doctor found problems")
+			prompt.LogError("doctor found problems")
 			os.Exit(1)
 			return nil
 		},
@@ -213,7 +213,7 @@ func addSecretCommands(root *cobra.Command, configPath *string, yes *bool) {
 		Short: "List stored DB password keys with created/updated/last-used timestamps",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := config.ResolvePath(*configPath)
-			fmt.Println("dumpmgr secret list")
+			prompt.Intro("dumpmgr secret list")
 			cfg, err := loadConfigOrExit(path, "config missing")
 			if err != nil {
 				return err
@@ -223,7 +223,7 @@ func addSecretCommands(root *cobra.Command, configPath *string, yes *bool) {
 				return err
 			}
 			if session == nil {
-				fmt.Println("nothing to list")
+				prompt.LogInfo("nothing to list")
 				return nil
 			}
 			defer session.Close()
@@ -231,7 +231,7 @@ func addSecretCommands(root *cobra.Command, configPath *string, yes *bool) {
 				return err
 			}
 			keys, _ := app.SortedSecretKeys(session)
-			fmt.Printf("%d stored\n", len(keys))
+			prompt.LogInfo(fmt.Sprintf("%d stored", len(keys)))
 			return nil
 		},
 	}
@@ -252,11 +252,11 @@ func addSecretCommands(root *cobra.Command, configPath *string, yes *bool) {
 				return err
 			}
 			if session == nil {
-				fmt.Println("no history")
+				prompt.LogInfo("no history")
 				return nil
 			}
 			defer session.Close()
-			fmt.Printf("dumpmgr secret history %s\n", args[0])
+			prompt.Intro(fmt.Sprintf("dumpmgr secret history %s", args[0]))
 			return printSecretHistory(session, args[0], 50)
 		},
 	}
@@ -269,7 +269,7 @@ func addSecretCommands(root *cobra.Command, configPath *string, yes *bool) {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := config.ResolvePath(*configPath)
 			targetKey := args[0]
-			fmt.Printf("dumpmgr secret wipe %s\n", targetKey)
+			prompt.Intro(fmt.Sprintf("dumpmgr secret wipe %s", targetKey))
 			cfg, err := loadConfigOrExit(path, "config missing")
 			if err != nil {
 				return err
@@ -279,7 +279,7 @@ func addSecretCommands(root *cobra.Command, configPath *string, yes *bool) {
 				return err
 			}
 			if session == nil {
-				fmt.Println("nothing to wipe")
+				prompt.LogInfo("nothing to wipe")
 				return nil
 			}
 			defer session.Close()
@@ -288,8 +288,8 @@ func addSecretCommands(root *cobra.Command, configPath *string, yes *bool) {
 				return err
 			}
 			if !ok {
-				fmt.Printf(`⚠ "%s" is not stored.`+"\n", targetKey)
-				fmt.Println("no change")
+				prompt.LogWarn(fmt.Sprintf(`"%s" is not stored.`, targetKey))
+				prompt.LogInfo("no change")
 				return nil
 			}
 			if !*yes {
@@ -298,8 +298,8 @@ func addSecretCommands(root *cobra.Command, configPath *string, yes *bool) {
 					return err
 				}
 				if !ok {
-					fmt.Println("⚠ wipe cancelled")
-					fmt.Println("no change")
+					prompt.LogWarn("wipe cancelled")
+					prompt.LogInfo("no change")
 					return nil
 				}
 			}
@@ -308,12 +308,12 @@ func addSecretCommands(root *cobra.Command, configPath *string, yes *bool) {
 				return err
 			}
 			if removed {
-				fmt.Printf(`✓ Removed "%s".`+"\n", targetKey)
-				fmt.Println("Encrypted dumps remain unaffected (they use the master key, not per-DB passwords).")
+				prompt.LogSuccess(fmt.Sprintf(`Removed "%s".`, targetKey))
+				prompt.LogInfo("Encrypted dumps remain unaffected (they use the master key, not per-DB passwords).")
 			} else {
-				fmt.Printf(`⚠ "%s" was already gone.`+"\n", targetKey)
+				prompt.LogWarn(fmt.Sprintf(`"%s" was already gone.`, targetKey))
 			}
-			fmt.Println("done")
+			prompt.Outro("done")
 			return nil
 		},
 	}
@@ -331,7 +331,7 @@ func addConfigCommands(root *cobra.Command, configPath *string) {
 		Use:   "init",
 		Short: "Scaffold config.jsonc and metadata",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("dumpmgr config init")
+			prompt.Intro("dumpmgr config init")
 			withFake, _ := cmd.Flags().GetBool("with-fake-data")
 			var withFakePtr *bool
 			if cmd.Flags().Changed("with-fake-data") {
@@ -341,7 +341,7 @@ func addConfigCommands(root *cobra.Command, configPath *string) {
 				Config:       config.ResolvePath(*configPath),
 				WithFakeData: withFakePtr,
 			}); err != nil {
-				fmt.Printf("✗ %v\n", err)
+				prompt.LogError(err.Error())
 				return err
 			}
 			return nil
@@ -355,27 +355,27 @@ func addConfigCommands(root *cobra.Command, configPath *string) {
 		Short: "Validate config.jsonc and print a summary report",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := config.ResolvePath(*configPath)
-			fmt.Println("dumpmgr config validate")
+			prompt.Intro("dumpmgr config validate")
 			result := config.ValidateFile(path)
 			if !result.OK {
 				for _, issue := range result.Issues {
-					fmt.Printf("✗ %s\n", issue)
+					prompt.LogError(issue)
 				}
-				fmt.Println("config invalid")
+				prompt.LogError("config invalid")
 				os.Exit(1)
 			}
 			for _, line := range result.Report {
 				if line != "" {
-					fmt.Println(line)
+					prompt.LogInfo(line)
 				}
 			}
 			for _, w := range result.Warnings {
-				fmt.Printf("⚠ %s\n", w)
+				prompt.LogWarn(w)
 			}
 			if len(result.Warnings) > 0 {
-				fmt.Println("config ok (with warnings)")
+				prompt.Outro("config ok (with warnings)")
 			} else {
-				fmt.Println("config ok")
+				prompt.Outro("config ok")
 			}
 			return nil
 		},
@@ -387,13 +387,13 @@ func addConfigCommands(root *cobra.Command, configPath *string) {
 		Short: "Format config.jsonc in place (preserves comments)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := config.ResolvePath(*configPath)
-			fmt.Println("dumpmgr config lint")
+			prompt.Intro("dumpmgr config lint")
 			if err := config.LintFile(path); err != nil {
-				fmt.Printf("✗ %v\n", err)
+				prompt.LogError(err.Error())
 				return err
 			}
-			fmt.Printf("✓ Formatted %s\n", path)
-			fmt.Println("done")
+			prompt.LogSuccess(fmt.Sprintf("Formatted %s", path))
+			prompt.Outro("done")
 			return nil
 		},
 	}
@@ -405,14 +405,14 @@ func addConfigCommands(root *cobra.Command, configPath *string) {
 
 func loadConfigOrExit(path, outro string) (*config.Config, error) {
 	if !config.Exists(path) {
-		fmt.Printf("✗ Config file not found: %s\n", path)
-		fmt.Println(outro)
+		prompt.LogError(fmt.Sprintf("Config file not found: %s", path))
+		prompt.LogError(outro)
 		os.Exit(1)
 	}
 	cfg, err := config.Load(path)
 	if err != nil {
-		fmt.Printf("✗ %v\n", err)
-		fmt.Println("config invalid")
+		prompt.LogError(err.Error())
+		prompt.LogError("config invalid")
 		os.Exit(1)
 	}
 	return cfg, nil

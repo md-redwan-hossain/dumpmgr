@@ -2,7 +2,6 @@ package initcmd
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/md-redwan-hossain/dumpmgr/src/internal/config"
 	"github.com/md-redwan-hossain/dumpmgr/src/internal/metadata"
@@ -25,8 +24,7 @@ func Run(opts Options) error {
 			return err
 		}
 		if !overwrite {
-			fmt.Println("Init aborted.")
-			os.Exit(0)
+			prompt.OnCancel()
 		}
 	}
 
@@ -64,7 +62,7 @@ func Run(opts Options) error {
 				return err
 			}
 			if action == "continue" {
-				fmt.Println("Keeping existing master password and saved DB secrets")
+				prompt.LogInfo("Keeping existing master password and saved DB secrets")
 			} else {
 				current, err := prompt.Password("current master password")
 				if err != nil {
@@ -84,7 +82,7 @@ func Run(opts Options) error {
 					return err
 				}
 				updated.Close()
-				fmt.Println("✓ Master password updated")
+				prompt.LogSuccess("Master password updated")
 			}
 		} else {
 			store.Close()
@@ -106,16 +104,16 @@ func Run(opts Options) error {
 		store.Close()
 	}
 
-	fmt.Printf("✓ Wrote %s\n", configPath)
+	prompt.LogSuccess(fmt.Sprintf("Wrote %s", configPath))
 	if config.NeedsMaster(&cfg) {
-		fmt.Printf("✓ vault ready at %s\n", vaultPath)
+		prompt.LogSuccess(fmt.Sprintf("vault ready at %s", vaultPath))
 	} else {
-		fmt.Printf("✓ vault initialized at %s\n", vaultPath)
+		prompt.LogSuccess(fmt.Sprintf("vault initialized at %s", vaultPath))
 	}
 	if withFakeData {
-		fmt.Println("Edit config.jsonc (replace fake database and S3 settings) before running dumpmgr.")
+		prompt.Outro("Edit config.jsonc (replace fake database and S3 settings) before running dumpmgr.")
 	} else {
-		fmt.Println("Add database items to config.jsonc, then run dumpmgr.")
+		prompt.Outro("Add database items to config.jsonc, then run dumpmgr.")
 	}
 	return nil
 }
@@ -130,7 +128,7 @@ func promptNewMasterPair() (string, error) {
 		return "", err
 	}
 	if confirm != master {
-		return "", fmt.Errorf("master passwords do not match")
+		prompt.OnCancel()
 	}
 	return master, nil
 }
